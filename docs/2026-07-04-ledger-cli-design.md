@@ -82,6 +82,8 @@ Paths resolved from the ledger header (`pluginsTxt`, `dataDir` for Skyrim; `inst
 
 Plugins.txt parsing: `*`-prefix = enabled convention, comments/blank lines ignored, BOM-safe, case-insensitive filename compare. CP77 runs the manifest/disk checks only (no plugin system).
 
+Manifest reader skips #-comment lines and tolerates legacy `Data\`-prefixed paths; plugin matching considers only .esp/.esl/.esm-suffixed values and splits legacy 'A.esp + B.esp' joined strings; prose placeholders like '(DLL)' are ignored.
+
 ## Safety & error handling
 
 - Every mutating command: copy ledger to `backups\ledger.json.bak-<yyyyMMdd-HHmmss>` (in the ledger's own dir; prune to newest 20) → build new JSON → **validate the result in memory** → write temp file in same dir → `os.replace` (atomic). A failed validation aborts before any write.

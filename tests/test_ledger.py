@@ -521,6 +521,34 @@ class CheckTests(LedgerTestCase):
         self.assertIn("ERROR", out)
         self.assertIn("claimed by", out)
 
+    def test_manifest_comment_lines_and_data_prefix_ignored(self):
+        # comment lines are not paths; legacy "Data\" prefix resolves against dataDir
+        (self.data_dir / "SKSE" / "Plugins").mkdir(parents=True)
+        (self.data_dir / "SKSE" / "Plugins" / "thing.dll").write_text("x")
+        body = "# CBPC (Nexus 21224) - 2026-06-21\r\nData\\SKSE\\Plugins\\thing.dll\r\n"
+        (self.manifests / "Mod-A.txt").write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+        self.plugins_txt.write_text("", encoding="utf-8")
+        self.write_ledger([{"name": "Mod A", "installed": "2026-06-20",
+                            "manifest": "manifests\\Mod-A.txt"}])
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 0)
+        self.assertNotIn("missing", out)
+
+    def test_prose_and_joined_plugin_values(self):
+        self.plugins_txt.write_text("*RaceMenu.esp\n*RaceMenuPlugin.esp\n", encoding="utf-8")
+        self.write_ledger([
+            {"name": "Crash Logger", "installed": "2026-06-20", "plugin": "(DLL)"},
+            {"name": "SRD", "installed": "2026-06-20", "plugin": "(DLL)"},
+            {"name": "RaceMenu", "installed": "2026-06-20",
+             "plugin": "RaceMenu.esp + RaceMenuPlugin.esp"},
+        ])
+        code, out = self.run_cli("check")
+        # no duplicate-claim ERROR for the "(DLL)" placeholders; joined string
+        # resolves to both real plugins, both enabled -> clean
+        self.assertEqual(code, 0)
+        self.assertNotIn("claimed by", out)
+        self.assertNotIn("(DLL)", out)
+
     def test_cp77_style_no_plugins_txt(self):
         # header without pluginsTxt: plugin checks skipped, manifest checks run
         self.make_manifest("Mod-A.txt", ["archive\\pc\\mod\\a.archive"])

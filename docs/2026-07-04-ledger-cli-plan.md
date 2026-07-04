@@ -1329,6 +1329,34 @@ class CheckTests(LedgerTestCase):
         self.assertIn("ERROR", out)
         self.assertIn("claimed by", out)
 
+    def test_manifest_comment_lines_and_data_prefix_ignored(self):
+        # comment lines are not paths; legacy "Data\" prefix resolves against dataDir
+        (self.data_dir / "SKSE" / "Plugins").mkdir(parents=True)
+        (self.data_dir / "SKSE" / "Plugins" / "thing.dll").write_text("x")
+        body = "# CBPC (Nexus 21224) - 2026-06-21\r\nData\\SKSE\\Plugins\\thing.dll\r\n"
+        (self.manifests / "Mod-A.txt").write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+        self.plugins_txt.write_text("", encoding="utf-8")
+        self.write_ledger([{"name": "Mod A", "installed": "2026-06-20",
+                            "manifest": "manifests\\Mod-A.txt"}])
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 0)
+        self.assertNotIn("missing", out)
+
+    def test_prose_and_joined_plugin_values(self):
+        self.plugins_txt.write_text("*RaceMenu.esp\n*RaceMenuPlugin.esp\n", encoding="utf-8")
+        self.write_ledger([
+            {"name": "Crash Logger", "installed": "2026-06-20", "plugin": "(DLL)"},
+            {"name": "SRD", "installed": "2026-06-20", "plugin": "(DLL)"},
+            {"name": "RaceMenu", "installed": "2026-06-20",
+             "plugin": "RaceMenu.esp + RaceMenuPlugin.esp"},
+        ])
+        code, out = self.run_cli("check")
+        # no duplicate-claim ERROR for the "(DLL)" placeholders; joined string
+        # resolves to both real plugins, both enabled -> clean
+        self.assertEqual(code, 0)
+        self.assertNotIn("claimed by", out)
+        self.assertNotIn("(DLL)", out)
+
     def test_cp77_style_no_plugins_txt(self):
         # header without pluginsTxt: plugin checks skipped, manifest checks run
         self.make_manifest("Mod-A.txt", ["archive\\pc\\mod\\a.archive"])
@@ -1368,12 +1396,16 @@ def parse_plugins_txt(path):
 
 
 def _entry_plugins(e):
+    """Plugin filenames claimed by an entry. Splits legacy 'A.esp + B.esp' joined
+    strings; ignores prose placeholders like '(DLL)' (only .esp/.esl/.esm count)."""
     plugin = e.get("plugin")
     if isinstance(plugin, str):
-        return [plugin]
-    if isinstance(plugin, list):
-        return [x for x in plugin if isinstance(x, str)]
-    return []
+        vals = [x.strip() for x in plugin.split(" + ")]
+    elif isinstance(plugin, list):
+        vals = [x.strip() for x in plugin if isinstance(x, str)]
+    else:
+        return []
+    return [v for v in vals if v.lower().endswith((".esp", ".esl", ".esm"))]
 
 
 def cmd_check(args):
@@ -1419,8 +1451,15 @@ def cmd_check(args):
             continue
         if not root:
             continue
-        paths = [x for x in mpath.read_bytes().decode("utf-8-sig").splitlines() if x.strip()]
-        hits = [p for p in paths if (Path(root) / p.replace("\\", "/")).exists()]
+        paths = [x.strip() for x in mpath.read_bytes().decode("utf-8-sig").splitlines()
+                 if x.strip() and not x.strip().startswith("#")]
+
+        def _resolve(p):
+            rel = p.replace("\\", "/")
+            if rel.lower().startswith("data/"):
+                rel = rel[5:]  # legacy manifests include the Data\ segment
+            return (Path(root) / rel).exists()
+        hits = [p for p in paths if _resolve(p)]
         if "removed" not in e:
             missing = [p for p in paths if p not in set(hits)]
             if missing:
