@@ -309,7 +309,11 @@ def migrate_data(data, ledger_path, apply):
                     e["plugin"] = e[alias]
                     del e[alias]
                     report.append(f"{label}: {alias} -> plugin")
-        if isinstance(e.get("files"), list) and e["files"]:
+        if "files" in e and "manifest" in e:
+            manual.append(f"SKIP {label}: has both 'files' and 'manifest' ({e['manifest']!r}) - review manually")
+        elif isinstance(e.get("files"), str) and e["files"].strip():
+            manual.append(f"MANUAL {label}: 'files' is prose text, not a list - convert manually")
+        elif isinstance(e.get("files"), list) and e["files"]:
             try:
                 if apply:
                     pointer, count = write_manifest(ledger_path, label, e["files"])
@@ -326,7 +330,7 @@ def migrate_data(data, ledger_path, apply):
                 del e["files"]
                 report.append(f"{label}: {count} inline files -> {pointer}")
             except LedgerError as ex:
-                manual.append(f"SKIP {label}: {ex}")
+                manual.append(f"SKIP {label} (manifest collision): {ex}")
         if "installed" not in e:
             manual.append(f"MANUAL {label}: no 'installed' date - backfill with "
                           f"`update --name \"{label}\" --installed YYYY-MM-DD`")

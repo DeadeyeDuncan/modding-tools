@@ -403,6 +403,33 @@ class MigrateTests(LedgerTestCase):
         mods = {e["name"]: e for e in self.reload()["mods"]}
         self.assertIn("files", mods["Inline Files"])  # untouched
 
+    def test_files_plus_manifest_co_presence_skipped(self):
+        mods = [
+            {"name": "Both List", "installed": "2026-06-20",
+             "manifest": "manifests\\Hand-Named.txt", "files": ["meshes\\a.nif"]},
+            {"name": "Both String", "installed": "2026-06-20",
+             "manifest": "manifests\\Other.txt", "files": "Data\\SKSE\\Plugins\\thing.dll"},
+            {"name": "Both Empty", "installed": "2026-06-20",
+             "manifest": "manifests\\Third.txt", "files": []},
+        ]
+        self.write_ledger(mods)
+        before = self.ledger_path.read_bytes()
+        code, out = self.run_cli("migrate", "--apply")
+        self.assertEqual(code, 1)
+        self.assertEqual(out.count("SKIP"), 3)
+        for name in ("Both List", "Both String", "Both Empty"):
+            self.assertIn(name, out)
+        self.assertEqual(self.ledger_path.read_bytes(), before)
+        self.assertFalse((self.manifests / "Both-List.txt").exists())
+
+    def test_files_prose_string_without_manifest_flagged(self):
+        self.write_ledger([{"name": "Prose Files", "installed": "2026-06-20",
+                            "files": "Data\\SKSE\\Plugins\\thing.dll"}])
+        code, out = self.run_cli("migrate")
+        self.assertEqual(code, 1)
+        self.assertIn("MANUAL Prose Files", out)
+        self.assertIn("prose text", out)
+
 
 if __name__ == "__main__":
     unittest.main()

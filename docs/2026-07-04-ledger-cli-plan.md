@@ -1026,7 +1026,7 @@ class MigrateTests(LedgerTestCase):
         self.write_ledger(self.drift_mods())
         before = self.ledger_path.read_bytes()
         code, out = self.run_cli("migrate")
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 1)
         self.assertIn("nexus -> nexusId", out)
         self.assertIn("MANUAL", out)  # the No Date entry
         self.assertEqual(self.ledger_path.read_bytes(), before)
@@ -1066,6 +1066,33 @@ class MigrateTests(LedgerTestCase):
         self.assertIn("SKIP", out)
         mods = {e["name"]: e for e in self.reload()["mods"]}
         self.assertIn("files", mods["Inline Files"])  # untouched
+
+    def test_files_plus_manifest_co_presence_skipped(self):
+        mods = [
+            {"name": "Both List", "installed": "2026-06-20",
+             "manifest": "manifests\\Hand-Named.txt", "files": ["meshes\\a.nif"]},
+            {"name": "Both String", "installed": "2026-06-20",
+             "manifest": "manifests\\Other.txt", "files": "Data\\SKSE\\Plugins\\thing.dll"},
+            {"name": "Both Empty", "installed": "2026-06-20",
+             "manifest": "manifests\\Third.txt", "files": []},
+        ]
+        self.write_ledger(mods)
+        before = self.ledger_path.read_bytes()
+        code, out = self.run_cli("migrate", "--apply")
+        self.assertEqual(code, 1)
+        self.assertEqual(out.count("SKIP"), 3)
+        for name in ("Both List", "Both String", "Both Empty"):
+            self.assertIn(name, out)
+        self.assertEqual(self.ledger_path.read_bytes(), before)
+        self.assertFalse((self.manifests / "Both-List.txt").exists())
+
+    def test_files_prose_string_without_manifest_flagged(self):
+        self.write_ledger([{"name": "Prose Files", "installed": "2026-06-20",
+                            "files": "Data\\SKSE\\Plugins\\thing.dll"}])
+        code, out = self.run_cli("migrate")
+        self.assertEqual(code, 1)
+        self.assertIn("MANUAL Prose Files", out)
+        self.assertIn("prose text", out)
 ```
 
 Note: `test_apply_*` write through `save_ledger`, which requires a valid result — but the "No Date" entry stays invalid (`installed` missing). Migration must therefore write via a **relaxed save** that tolerates exactly the violations it reported as MANUAL. Implementation handles this by snapshotting the ledger's pre-existing violations before migration and passing them as `allow_violations` — migration may not introduce NEW violations, but violations that predate it pass through.
@@ -1129,7 +1156,11 @@ def migrate_data(data, ledger_path, apply):
                     e["plugin"] = e[alias]
                     del e[alias]
                     report.append(f"{label}: {alias} -> plugin")
-        if isinstance(e.get("files"), list) and e["files"]:
+        if "files" in e and "manifest" in e:
+            manual.append(f"SKIP {label}: has both 'files' and 'manifest' ({e['manifest']!r}) - review manually")
+        elif isinstance(e.get("files"), str) and e["files"].strip():
+            manual.append(f"MANUAL {label}: 'files' is prose text, not a list - convert manually")
+        elif isinstance(e.get("files"), list) and e["files"]:
             try:
                 if apply:
                     pointer, count = write_manifest(ledger_path, label, e["files"])
@@ -1146,7 +1177,7 @@ def migrate_data(data, ledger_path, apply):
                 del e["files"]
                 report.append(f"{label}: {count} inline files -> {pointer}")
             except LedgerError as ex:
-                manual.append(f"SKIP {label}: {ex}")
+                manual.append(f"SKIP {label} (manifest collision): {ex}")
         if "installed" not in e:
             manual.append(f"MANUAL {label}: no 'installed' date - backfill with "
                           f"`update --name \"{label}\" --installed YYYY-MM-DD`")
@@ -1442,7 +1473,7 @@ Expected: Skyrim reports violations on drift-era entries (8 missing `installed`,
 py -3 C:\Modding\tools\ledger.py migrate --game skyrim
 ```
 
-Expected: ~40 `nexus -> nexusId`, ~6 `notes -> note`, ~13 `esp/esm -> plugin`, ~41 inline-files extractions, 8 MANUAL missing-date lines (entries #153–160: CBPC, HIMBO, TNG, TNG TRX, Floppy Schlongs, SkySight, Lucid, TNG Racial Variances). **Present the full report to the user. STOP for approval before Step 4.**
+Expected: ~40 `nexus -> nexusId`, ~6 `notes -> note`, ~13 `esp/esm -> plugin`, ~41 inline-files extractions, 8 MANUAL missing-date lines (entries #153–160: CBPC, HIMBO, TNG, TNG TRX, Floppy Schlongs, SkySight, Lucid, TNG Racial Variances), plus SKIP/MANUAL lines for the 14 files+manifest co-presence entries and any prose-string files fields — all reviewed by the user before apply. **Present the full report to the user. STOP for approval before Step 4.**
 
 - [ ] **Step 4: Apply (after user approval)**
 

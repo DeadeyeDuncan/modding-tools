@@ -55,6 +55,7 @@ Normalizes the drift-era Skyrim entries:
 2. `notes` → `note` (~6; if both exist, merge with newline)
 3. `esp` / `esm` → `plugin` (~13)
 4. Inline `files` arrays (~41 entries) → written to `manifests\<sanitized-name>.txt` (existing convention: UTF-8 **with BOM**, CRLF, one Data-relative backslash path per line), entry gets `manifest` + `fileCount`, `files` key dropped. If a manifest file with that name already exists and differs, abort that entry with a report line (no silent overwrite).
+5. Entries carrying BOTH `files` and `manifest` are never auto-resolved — reported as SKIP for manual review (real ledger has 14, incl. hand-shortened pointer names sanitize_name cannot reproduce). `files` holding prose text instead of a list is reported MANUAL, never parsed.
 
 `migrate` is **dry-run by default** (prints per-entry change report); `--apply` executes with backup-first. Idempotent: second run reports zero changes.
 
