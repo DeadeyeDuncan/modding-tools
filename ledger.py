@@ -331,6 +331,9 @@ def migrate_data(data, ledger_path, apply):
                 report.append(f"{label}: {count} inline files -> {pointer}")
             except LedgerError as ex:
                 manual.append(f"SKIP {label} (manifest collision): {ex}")
+        elif "files" in e:  # empty list/blank string, no manifest: no content to extract
+            del e["files"]
+            report.append(f"{label}: empty 'files' dropped (fileCount {e.get('fileCount')} kept)")
         if "installed" not in e:
             manual.append(f"MANUAL {label}: no 'installed' date - backfill with "
                           f"`update --name \"{label}\" --installed YYYY-MM-DD`")

@@ -1093,6 +1093,16 @@ class MigrateTests(LedgerTestCase):
         self.assertEqual(code, 1)
         self.assertIn("MANUAL Prose Files", out)
         self.assertIn("prose text", out)
+
+    def test_empty_files_without_manifest_dropped_with_report(self):
+        self.write_ledger([{"name": "Empty Files", "installed": "2026-06-20",
+                            "files": [], "fileCount": 4754}])
+        code, out = self.run_cli("migrate", "--apply")
+        self.assertEqual(code, 0)
+        self.assertIn("empty 'files' dropped", out)
+        mods = json.loads(self.ledger_path.read_bytes().decode("utf-8-sig"))["mods"]
+        self.assertNotIn("files", mods[0])
+        self.assertEqual(mods[0]["fileCount"], 4754)
 ```
 
 Note: `test_apply_*` write through `save_ledger`, which requires a valid result — but the "No Date" entry stays invalid (`installed` missing). Migration must therefore write via a **relaxed save** that tolerates exactly the violations it reported as MANUAL. Implementation handles this by snapshotting the ledger's pre-existing violations before migration and passing them as `allow_violations` — migration may not introduce NEW violations, but violations that predate it pass through.
@@ -1178,6 +1188,9 @@ def migrate_data(data, ledger_path, apply):
                 report.append(f"{label}: {count} inline files -> {pointer}")
             except LedgerError as ex:
                 manual.append(f"SKIP {label} (manifest collision): {ex}")
+        elif "files" in e:  # empty list/blank string, no manifest: no content to extract
+            del e["files"]
+            report.append(f"{label}: empty 'files' dropped (fileCount {e.get('fileCount')} kept)")
         if "installed" not in e:
             manual.append(f"MANUAL {label}: no 'installed' date - backfill with "
                           f"`update --name \"{label}\" --installed YYYY-MM-DD`")

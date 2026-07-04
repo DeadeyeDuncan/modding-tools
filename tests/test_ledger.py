@@ -430,6 +430,16 @@ class MigrateTests(LedgerTestCase):
         self.assertIn("MANUAL Prose Files", out)
         self.assertIn("prose text", out)
 
+    def test_empty_files_without_manifest_dropped_with_report(self):
+        self.write_ledger([{"name": "Empty Files", "installed": "2026-06-20",
+                            "files": [], "fileCount": 4754}])
+        code, out = self.run_cli("migrate", "--apply")
+        self.assertEqual(code, 0)
+        self.assertIn("empty 'files' dropped", out)
+        mods = json.loads(self.ledger_path.read_bytes().decode("utf-8-sig"))["mods"]
+        self.assertNotIn("files", mods[0])
+        self.assertEqual(mods[0]["fileCount"], 4754)
+
 
 if __name__ == "__main__":
     unittest.main()
