@@ -1628,7 +1628,7 @@ Expected: Skyrim reports 15 pre-existing violations (8 missing `installed` + 5 s
 py -3 C:\Modding\tools\ledger.py migrate --game skyrim
 ```
 
-Expected: ~40 `nexus -> nexusId` moves (numeric-string values convert to int with a `nexus '<s>' -> nexusId <n>` line; non-numeric values like 'VectorPlexus'/'manual' become MANUAL lines), ~6 `notes -> note`, the 13 boolean `esp`/`esm` values become `dropped (no plugin)` report lines (False) or MANUAL lines (True — Obsidian's esm), inline-files extractions, 8 MANUAL missing-date lines (entries #153–160: CBPC, HIMBO, TNG, TNG TRX, Floppy Schlongs, SkySight, Lucid, TNG Racial Variances), plus SKIP/MANUAL lines for the 14 files+manifest co-presence entries and any prose-string files fields, and `empty 'files' dropped` lines for the 11 empty-files entries. Any BLOCKED lines (`would create violation`) mean migration would corrupt the ledger — must be zero before apply. All reviewed by the user before apply. **Present the full report to the user. STOP for approval before Step 4.**
+Expected: ~40 `nexus -> nexusId` moves (numeric-string values convert to int with a `nexus '<s>' -> nexusId <n>` line; non-numeric values like 'VectorPlexus'/'manual' become MANUAL lines), ~6 `notes -> note`, the 13 boolean `esp`/`esm` values become `dropped (no plugin)` report lines (False) or MANUAL lines (the 6 `True` markers, incl. Obsidian's esm), inline-files extractions, 8 MANUAL missing-date lines (entries #153–160: CBPC, HIMBO, TNG, TNG TRX, Floppy Schlongs, SkySight, Lucid, TNG Racial Variances), plus SKIP/MANUAL lines for the 14 files+manifest co-presence entries and any prose-string files fields, and `empty 'files' dropped` lines for the 11 empty-files entries. Any BLOCKED lines (`would create violation`) mean migration would corrupt the ledger — must be zero before apply. All reviewed by the user before apply. **Present the full report to the user. STOP for approval before Step 4.**
 
 - [ ] **Step 4: Apply (after user approval)**
 
@@ -1654,7 +1654,7 @@ py -3 C:\Modding\tools\ledger.py update --game skyrim --name "Lucid Skin (female
 py -3 C:\Modding\tools\ledger.py update --game skyrim --name "TNG Racial Penis Variances (LDD BnP/TRX)" --installed 2026-06-24
 ```
 
-(Confirm each date against the wiki articles before running; adjust if an article says otherwise. These entries pre-date manifests — several were removed/swapped later per wiki; their alias-era `esp` fields become `plugin` in migration.)
+(Confirm each date against the wiki articles before running; adjust if an article says otherwise. These entries pre-date manifests — several were removed/swapped later per wiki; their `esp: true` markers are boolean flags, not filenames — they survive migration as recurring MANUAL lines until hand-resolved.)
 
 Then: `py -3 C:\Modding\tools\ledger.py validate --game skyrim` → Expected: exit 1 with exactly 7 legacy violations remaining (5 string `nexusId` + 1 duplicate name + 1 prose `removed` date) — these pre-date the tool and await user cleanup decisions; they do not block incremental edits thanks to the scoped pre-existing allowance in add/update/remove.
 
