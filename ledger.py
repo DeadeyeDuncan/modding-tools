@@ -168,6 +168,68 @@ def _entry_line(e):
     return "  ".join(bits)
 
 
+def sanitize_name(name):
+    out = re.sub(r"[^A-Za-z0-9.+-]+", "-", name.strip()).strip("-")
+    return out or "unnamed"
+
+
+def write_manifest(ledger_path, name, paths, expect_absent=True):
+    """Write manifests\\<sanitized>.txt (UTF-8 BOM, CRLF). Returns (pointer, count)."""
+    mdir = Path(ledger_path).parent / "manifests"
+    mdir.mkdir(exist_ok=True)
+    fname = sanitize_name(name) + ".txt"
+    target = mdir / fname
+    body = "\r\n".join(paths) + "\r\n"
+    if target.exists():
+        existing = target.read_bytes().decode("utf-8-sig").replace("\r\n", "\n").strip()
+        if existing != "\n".join(paths).strip():
+            if expect_absent:
+                raise LedgerError(f"manifest already exists with different content: {target}")
+    target.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+    return f"manifests\\{fname}", len(paths)
+
+
+def read_staged_list(path):
+    p = Path(path)
+    if not p.is_file():
+        raise LedgerError(f"staged file list not found: {p}")
+    lines = p.read_bytes().decode("utf-8-sig").replace("\r\n", "\n").split("\n")
+    return [x.strip() for x in lines if x.strip()]
+
+
+def _plugin_value(plugins):
+    if not plugins:
+        return None
+    return plugins[0] if len(plugins) == 1 else plugins
+
+
+def cmd_add(args):
+    path = _resolve_ledger(args)
+    data = load_ledger(path)
+    if find_entry(data, args.name):
+        raise LedgerError(f"entry {args.name!r} already exists - use `update`")
+    e = {"name": args.name}
+    if args.nexus_id is not None:
+        e["nexusId"] = args.nexus_id
+    for field, val in (("version", args.version), ("source", args.source),
+                       ("role", args.role), ("note", args.note)):
+        if val:
+            e[field] = val
+    plugin = _plugin_value(args.plugin)
+    if plugin is not None:
+        e["plugin"] = plugin
+    if args.esl:
+        e["esl"] = True
+    if args.files_from:
+        paths = read_staged_list(args.files_from)
+        e["manifest"], e["fileCount"] = write_manifest(path, args.name, paths)
+    e["installed"] = args.installed or today()
+    data["mods"].append(e)
+    save_ledger(path, data)
+    safe_print(f"added: {_entry_line(e)}")
+    return 0
+
+
 def cmd_get(args):
     data = load_ledger(_resolve_ledger(args))
     e = find_entry(data, args.name)
@@ -238,6 +300,19 @@ def build_parser():
 
     sp = sub.add_parser("validate", parents=[common])
     sp.set_defaults(func=cmd_validate)
+
+    sp = sub.add_parser("add", parents=[common])
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--nexus-id", type=int, dest="nexus_id")
+    sp.add_argument("--version")
+    sp.add_argument("--source")
+    sp.add_argument("--plugin", action="append", default=[])
+    sp.add_argument("--esl", action="store_true")
+    sp.add_argument("--role")
+    sp.add_argument("--note")
+    sp.add_argument("--installed", help="override auto date (YYYY-MM-DD)")
+    sp.add_argument("--files-from", help="staged file list -> writes manifests\\<name>.txt")
+    sp.set_defaults(func=cmd_add)
     return p
 
 

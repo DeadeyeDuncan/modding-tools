@@ -223,5 +223,54 @@ class CliReadTests(LedgerTestCase):
         self.assertIn("2 total", buf.getvalue())
 
 
+class AddTests(LedgerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.write_ledger([{"name": "Mod A", "installed": "2026-06-20"}])
+
+    def reload(self):
+        return json.loads(self.ledger_path.read_bytes().decode("utf-8-sig"))
+
+    def test_add_basic_auto_date(self):
+        code, _ = self.run_cli("add", "--name", "Mod B", "--nexus-id", "42",
+                               "--version", "2.1", "--plugin", "B.esp",
+                               "--note", "combat overhaul")
+        self.assertEqual(code, 0)
+        e = [x for x in self.reload()["mods"] if x["name"] == "Mod B"][0]
+        self.assertEqual(e["nexusId"], 42)
+        self.assertEqual(e["plugin"], "B.esp")
+        self.assertRegex(e["installed"], r"^\d{4}-\d{2}-\d{2}$")
+
+    def test_add_multi_plugin_becomes_list(self):
+        self.run_cli("add", "--name", "Mod C", "--plugin", "C1.esp", "--plugin", "C2.esl")
+        e = [x for x in self.reload()["mods"] if x["name"] == "Mod C"][0]
+        self.assertEqual(e["plugin"], ["C1.esp", "C2.esl"])
+
+    def test_add_duplicate_refused(self):
+        code, out = self.run_cli("add", "--name", "mod a")
+        self.assertEqual(code, 2)
+        self.assertIn("update", out)
+
+    def test_add_files_from_writes_manifest_bom_crlf(self):
+        staged = self.root / "staged.txt"
+        staged.write_text("meshes\\a.nif\ntextures\\b.dds\n", encoding="utf-8")
+        code, _ = self.run_cli("add", "--name", "Mod D", "--files-from", str(staged))
+        self.assertEqual(code, 0)
+        e = [x for x in self.reload()["mods"] if x["name"] == "Mod D"][0]
+        self.assertEqual(e["fileCount"], 2)
+        self.assertEqual(e["manifest"], "manifests\\Mod-D.txt")
+        raw = (self.manifests / "Mod-D.txt").read_bytes()
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
+        self.assertIn(b"meshes\\a.nif\r\n", raw)
+
+    def test_add_manifest_collision_refused(self):
+        (self.manifests / "Mod-E.txt").write_bytes(b"\xef\xbb\xbfother\r\n")
+        staged = self.root / "staged.txt"
+        staged.write_text("meshes\\e.nif\n", encoding="utf-8")
+        code, out = self.run_cli("add", "--name", "Mod E", "--files-from", str(staged))
+        self.assertEqual(code, 2)
+        self.assertIn("exists", out)
+
+
 if __name__ == "__main__":
     unittest.main()
