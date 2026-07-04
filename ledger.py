@@ -134,8 +134,122 @@ def safe_print(s):
         print(s.encode("ascii", "backslashreplace").decode("ascii"))
 
 
-def main(argv=None):
+def find_entry(data, name):
+    key = name.strip().lower()
+    for e in data["mods"]:
+        if isinstance(e.get("name"), str) and e["name"].strip().lower() == key:
+            return e
+    return None
+
+
+def today():
+    return datetime.date.today().isoformat()
+
+
+def _resolve_ledger(args):
+    if getattr(args, "ledger", None):
+        return Path(args.ledger)
+    game = getattr(args, "game", None)
+    if game in GAMES:
+        return GAMES[game]
+    raise LedgerError(f"unknown --game {game!r}; pass --game skyrim|cp77 or --ledger <path>")
+
+
+def _entry_line(e):
+    bits = [e.get("name", "?")]
+    if e.get("version"):
+        bits.append(f"v{e['version']}")
+    bits.append(f"installed {e.get('installed', '?')}")
+    plugin = e.get("plugin")
+    if plugin:
+        bits.append(", ".join(plugin) if isinstance(plugin, list) else plugin)
+    if "removed" in e:
+        bits.append(f"[REMOVED {e['removed']}]")
+    return "  ".join(bits)
+
+
+def cmd_get(args):
+    data = load_ledger(_resolve_ledger(args))
+    e = find_entry(data, args.name)
+    if e is None:
+        close = difflib.get_close_matches(
+            args.name, [x.get("name", "") for x in data["mods"]], n=3)
+        raise LedgerError(f"no entry named {args.name!r}" +
+                          (f"; close: {', '.join(close)}" if close else ""))
+    safe_print(json.dumps(e, indent=2, ensure_ascii=False))
     return 0
+
+
+def cmd_list(args):
+    data = load_ledger(_resolve_ledger(args))
+    mods = data["mods"]
+    if args.active:
+        mods = [e for e in mods if "removed" not in e]
+    if args.removed:
+        mods = [e for e in mods if "removed" in e]
+    if args.since:
+        mods = [e for e in mods if e.get("installed", "") >= args.since]
+    if args.count:
+        total = len(data["mods"])
+        removed = sum(1 for e in data["mods"] if "removed" in e)
+        safe_print(f"{total} total, {total - removed} active, {removed} removed"
+                   f" ({len(mods)} matching filters)")
+        return 0
+    for e in mods:
+        safe_print(_entry_line(e))
+    return 0
+
+
+def cmd_validate(args):
+    data = load_ledger(_resolve_ledger(args))
+    violations = validate_data(data)
+    for x in violations:
+        safe_print(f"VIOLATION: {x}")
+    safe_print(f"{len(violations)} violation(s)")
+    return 1 if violations else 0
+
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="ledger.py", description=__doc__)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--game", choices=None, help="skyrim | cp77")
+    common.add_argument("--ledger", help="explicit ledger.json path (overrides --game)")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    sp = sub.add_parser("get", parents=[common])
+    sp.add_argument("--name", required=True)
+    sp.set_defaults(func=cmd_get)
+
+    sp = sub.add_parser("list", parents=[common])
+    sp.add_argument("--active", action="store_true")
+    sp.add_argument("--removed", action="store_true")
+    sp.add_argument("--since")
+    sp.add_argument("--count", action="store_true")
+    sp.set_defaults(func=cmd_list)
+
+    sp = sub.add_parser("validate", parents=[common])
+    sp.set_defaults(func=cmd_validate)
+    return p
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # global flags may appear before the subcommand; hoist them behind it
+    lead, rest = [], list(argv)
+    while rest and (rest[0] in ("--game", "--ledger")
+                    or rest[0].startswith(("--game=", "--ledger="))):
+        if "=" in rest[0] or len(rest) < 2:
+            lead.append(rest.pop(0))
+        else:
+            lead += rest[:2]
+            rest = rest[2:]
+    parser = build_parser()
+    args = parser.parse_args(rest + lead)
+    try:
+        return args.func(args)
+    except LedgerError as ex:
+        safe_print(f"ERROR: {ex}")
+        return 2
 
 
 if __name__ == "__main__":

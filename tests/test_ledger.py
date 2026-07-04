@@ -162,5 +162,51 @@ class IoTests(LedgerTestCase):
         self.assertTrue(len(baks) >= 1)
 
 
+class CliReadTests(LedgerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.write_ledger([
+            {"name": "Mod A", "installed": "2026-06-20", "version": "1.0", "plugin": "A.esp"},
+            {"name": "Mod B", "installed": "2026-07-01", "removed": "2026-07-02",
+             "removedReason": "broke saves"},
+        ])
+
+    def test_get_prints_entry_json(self):
+        code, out = self.run_cli("get", "--name", "mod a")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["name"], "Mod A")
+
+    def test_get_unknown_exits_2(self):
+        code, out = self.run_cli("get", "--name", "Nope")
+        self.assertEqual(code, 2)
+
+    def test_list_filters(self):
+        code, out = self.run_cli("list", "--active")
+        self.assertEqual(code, 0)
+        self.assertIn("Mod A", out)
+        self.assertNotIn("Mod B", out)
+        code, out = self.run_cli("list", "--removed")
+        self.assertIn("Mod B", out)
+        code, out = self.run_cli("list", "--since", "2026-07-01")
+        self.assertNotIn("Mod A", out)
+        code, out = self.run_cli("list", "--count")
+        self.assertIn("2 total", out)
+
+    def test_validate_clean_and_dirty(self):
+        code, _ = self.run_cli("validate")
+        self.assertEqual(code, 0)
+        raw = json.loads(self.ledger_path.read_bytes().decode("utf-8-sig"))
+        raw["mods"].append({"name": "Mod A", "installed": "2026-07-03"})
+        self.ledger_path.write_bytes(json.dumps(raw).encode("utf-8"))
+        code, out = self.run_cli("validate")
+        self.assertEqual(code, 1)
+        self.assertIn("duplicate", out)
+
+    def test_game_preset_resolution(self):
+        # --game must map to the baked-in path; unknown game exits 2
+        code = ledger.main(["get", "--game", "nogame", "--name", "x"])
+        self.assertEqual(code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -576,8 +576,18 @@ def build_parser():
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # global flags may appear before the subcommand; hoist them behind it
+    lead, rest = [], list(argv)
+    while rest and (rest[0] in ("--game", "--ledger")
+                    or rest[0].startswith(("--game=", "--ledger="))):
+        if "=" in rest[0] or len(rest) < 2:
+            lead.append(rest.pop(0))
+        else:
+            lead += rest[:2]
+            rest = rest[2:]
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(rest + lead)
     try:
         return args.func(args)
     except LedgerError as ex:
@@ -585,7 +595,7 @@ def main(argv=None):
         return 2
 ```
 
-(`--game` uses free text + `_resolve_ledger` raising `LedgerError`, so unknown games exit 2 instead of argparse's own error path — matches the test.)
+(`--game` uses free text + `_resolve_ledger` raising `LedgerError`, so unknown games exit 2 instead of argparse's own error path — matches the test. main() hoists leading --game/--ledger flags behind the subcommand so both `ledger.py --ledger X get` and `ledger.py get --ledger X` parse; flags are registered on subparsers only.)
 
 - [ ] **Step 4: Run tests, expect pass**
 
