@@ -203,11 +203,24 @@ def _plugin_value(plugins):
     return plugins[0] if len(plugins) == 1 else plugins
 
 
+def _scoped_allowance(data, entry_name):
+    """Pre-existing violations minus those on the entry being edited.
+
+    Lets add/update/remove work incrementally on an imperfect ledger: unrelated
+    entries' existing violations never block the edit, but the edited entry
+    itself must validate (you cannot make IT worse; fixing it clears naturally).
+    """
+    pre = validate_data(data)
+    key = entry_name.strip().lower()
+    return [v for v in pre if not v.lower().startswith(key + ":")]
+
+
 def cmd_add(args):
     path = _resolve_ledger(args)
     data = load_ledger(path)
     if find_entry(data, args.name):
         raise LedgerError(f"entry {args.name!r} already exists - use `update`")
+    allowance = _scoped_allowance(data, args.name)
     e = {"name": args.name}
     if args.nexus_id is not None:
         e["nexusId"] = args.nexus_id
@@ -220,12 +233,21 @@ def cmd_add(args):
         e["plugin"] = plugin
     if args.esl:
         e["esl"] = True
+    staged = None
     if args.files_from:
-        paths = read_staged_list(args.files_from)
-        e["manifest"], e["fileCount"] = write_manifest(path, args.name, paths)
+        staged = read_staged_list(args.files_from)
+        # pointer fields set up-front; the file is written only after the
+        # assembled entry is known to validate (no orphan manifests)
+        e["manifest"] = f"manifests\\{sanitize_name(args.name)}.txt"
+        e["fileCount"] = len(staged)
     e["installed"] = args.installed or today()
     data["mods"].append(e)
-    save_ledger(path, data)
+    violations = [v for v in validate_data(data) if v not in set(allowance)]
+    if violations:
+        raise LedgerError("refusing to write invalid ledger:\n  " + "\n  ".join(violations))
+    if staged is not None:
+        e["manifest"], e["fileCount"] = write_manifest(path, args.name, staged)
+    save_ledger(path, data, allow_violations=allowance)
     safe_print(f"added: {_entry_line(e)}")
     return 0
 
@@ -239,6 +261,7 @@ def cmd_update(args):
             args.name, [x.get("name", "") for x in data["mods"]], n=3)
         raise LedgerError(f"no entry named {args.name!r}" +
                           (f"; close: {', '.join(close)}" if close else ""))
+    allowance = _scoped_allowance(data, e["name"])
     for field, val in (("version", args.version), ("source", args.source),
                        ("role", args.role), ("note", args.note),
                        ("installed", args.installed)):
@@ -252,7 +275,7 @@ def cmd_update(args):
     if args.append_note:
         stamp = f"[{today()}] {args.append_note}"
         e["note"] = (e["note"] + "\n" + stamp) if e.get("note") else stamp
-    save_ledger(path, data)
+    save_ledger(path, data, allow_violations=allowance)
     safe_print(f"updated: {_entry_line(e)}")
     return 0
 
@@ -267,33 +290,43 @@ def cmd_remove(args):
         raise LedgerError(f"{e['name']!r} already removed on {e['removed']}")
     if not args.reason.strip():
         raise LedgerError("--reason must be non-empty")
+    allowance = _scoped_allowance(data, e["name"])
     e["removed"] = today()
     e["removedReason"] = args.reason
     if args.to:
         e["removedTo"] = args.to
-    save_ledger(path, data)
+    save_ledger(path, data, allow_violations=allowance)
     safe_print(f"removed: {_entry_line(e)}")
     return 0
 
 
-def migrate_data(data, ledger_path, apply):
-    """Normalize drift-era fields. Returns (report_lines, manual_lines).
+def migrate_data(data, ledger_path):
+    """Normalize drift-era fields. Returns (report_lines, manual_lines, pending_writes).
 
-    report_lines: changes made (or would be made); manual_lines: things a human
-    must fix (e.g. missing installed dates).
+    report_lines: changes made (or that would be made); manual_lines: things a
+    human must fix (e.g. missing installed dates); pending_writes: (name, paths)
+    manifest extractions, deferred so nothing touches disk until the migrated
+    ledger is known to validate.
     """
-    report, manual = [], []
+    report, manual, pending = [], [], []
     for e in data["mods"]:
         if not isinstance(e, dict):
             continue
         label = e.get("name", "?")
         if "nexus" in e:
-            if "nexusId" in e and e["nexusId"] != e["nexus"]:
-                manual.append(f"SKIP {label}: nexus={e['nexus']} conflicts nexusId={e['nexusId']}")
-            else:
-                e.setdefault("nexusId", e["nexus"])
+            value = e["nexus"]
+            if "nexusId" in e and e["nexusId"] != value:
+                manual.append(f"SKIP {label}: nexus={value} conflicts nexusId={e['nexusId']}")
+            elif isinstance(value, int) and not isinstance(value, bool):
+                e.setdefault("nexusId", value)
                 del e["nexus"]
                 report.append(f"{label}: nexus -> nexusId")
+            elif isinstance(value, str) and value.isdigit():
+                e["nexusId"] = int(value)
+                del e["nexus"]
+                report.append(f"{label}: nexus '{value}' -> nexusId {int(value)}")
+            else:
+                manual.append(f"MANUAL {label}: nexus={value!r} not an integer - resolve manually")
         if "notes" in e:
             if e.get("note"):
                 e["note"] = e["note"] + "\n" + str(e["notes"])
@@ -303,28 +336,33 @@ def migrate_data(data, ledger_path, apply):
             report.append(f"{label}: notes -> note")
         for alias in ("esp", "esm"):
             if alias in e:
-                if e.get("plugin") and e["plugin"] != e[alias]:
-                    manual.append(f"SKIP {label}: {alias}={e[alias]!r} conflicts plugin={e['plugin']!r}")
-                else:
-                    e["plugin"] = e[alias]
+                value = e[alias]
+                if isinstance(value, str) and value.strip():
+                    if e.get("plugin") and e["plugin"] != value:
+                        manual.append(f"SKIP {label}: {alias}={value!r} conflicts plugin={e['plugin']!r}")
+                    else:
+                        e["plugin"] = value
+                        del e[alias]
+                        report.append(f"{label}: {alias} -> plugin ({value!r})")
+                elif value is False or value is None:
                     del e[alias]
-                    report.append(f"{label}: {alias} -> plugin")
+                    report.append(f"{label}: {alias}={value!r} dropped (no plugin)")
+                else:
+                    manual.append(f"MANUAL {label}: {alias}={value!r} is not a filename - resolve manually")
         if "files" in e and "manifest" in e:
             manual.append(f"SKIP {label}: has both 'files' and 'manifest' ({e['manifest']!r}) - review manually")
         elif isinstance(e.get("files"), str) and e["files"].strip():
             manual.append(f"MANUAL {label}: 'files' is prose text, not a list - convert manually")
         elif isinstance(e.get("files"), list) and e["files"]:
             try:
-                if apply:
-                    pointer, count = write_manifest(ledger_path, label, e["files"])
-                else:
-                    pointer, count = f"manifests\\{sanitize_name(label)}.txt", len(e["files"])
-                    mdir = Path(ledger_path).parent / "manifests"
-                    target = mdir / (sanitize_name(label) + ".txt")
-                    if target.exists():
-                        existing = target.read_bytes().decode("utf-8-sig").replace("\r\n", "\n").strip()
-                        if existing != "\n".join(e["files"]).strip():
-                            raise LedgerError(f"manifest already exists with different content: {target}")
+                fname = sanitize_name(label) + ".txt"
+                pointer, count = f"manifests\\{fname}", len(e["files"])
+                target = Path(ledger_path).parent / "manifests" / fname
+                if target.exists():
+                    existing = target.read_bytes().decode("utf-8-sig").replace("\r\n", "\n").strip()
+                    if existing != "\n".join(e["files"]).strip():
+                        raise LedgerError(f"manifest already exists with different content: {target}")
+                pending.append((label, e["files"]))
                 e["manifest"] = pointer
                 e["fileCount"] = count
                 del e["files"]
@@ -337,7 +375,7 @@ def migrate_data(data, ledger_path, apply):
         if "installed" not in e:
             manual.append(f"MANUAL {label}: no 'installed' date - backfill with "
                           f"`update --name \"{label}\" --installed YYYY-MM-DD`")
-    return report, manual
+    return report, manual, pending
 
 
 def cmd_migrate(args):
@@ -345,14 +383,24 @@ def cmd_migrate(args):
     data = load_ledger(path)
     pre_existing = validate_data(data)  # violations that predate migration (e.g. missing installed dates)
     work = data if args.apply else copy.deepcopy(data)
-    report, manual = migrate_data(work, path, apply=args.apply)
+    report, manual, pending = migrate_data(work, path)
     for line in report:
         safe_print(("" if args.apply else "would: ") + line)
     for line in manual:
         safe_print(line)
-    safe_print(f"{len(report)} change(s), {len(manual)} manual item(s)"
+    # save-gate simulation: migration may not introduce NEW violations; both
+    # modes report BLOCKED lines, and nothing (manifests included) is written
+    new_violations = [v for v in validate_data(work) if v not in set(pre_existing)]
+    for v in new_violations:
+        safe_print(f"BLOCKED: would create violation: {v}")
+    safe_print(f"{len(report)} change(s), {len(manual)} manual item(s), "
+               f"{len(new_violations)} blocked"
                + ("" if args.apply else " [dry-run - use --apply]"))
+    if new_violations:
+        return 2 if args.apply else 1
     if args.apply and report:
+        for name, paths in pending:
+            write_manifest(path, name, paths)
         save_ledger(path, work, allow_violations=pre_existing)
     return 1 if manual else 0
 

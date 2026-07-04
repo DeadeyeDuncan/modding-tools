@@ -56,6 +56,8 @@ Normalizes the drift-era Skyrim entries:
 3. `esp` / `esm` → `plugin` (~13)
 4. Inline `files` arrays (~41 entries) → written to `manifests\<sanitized-name>.txt` (existing convention: UTF-8 **with BOM**, CRLF, one Data-relative backslash path per line), entry gets `manifest` + `fileCount`, `files` key dropped. If a manifest file with that name already exists and differs, abort that entry with a report line (no silent overwrite).
 5. Entries carrying BOTH `files` and `manifest` are never auto-resolved — reported as SKIP for manual review (real ledger has 14, incl. hand-shortened pointer names sanitize_name cannot reproduce). `files` holding prose text instead of a list is reported MANUAL, never parsed. Empty `files` (list or blank) without a `manifest` pointer is dropped with a report line, `fileCount` preserved (real ledger: 11 such entries).
+6. Typed alias values: `esp`/`esm` move to `plugin` only when the value is a non-empty string. `false`/`null` values (real ledger: all 13 alias values are booleans — "no plugin" markers) are dropped with a report line; `true` or any other type is reported MANUAL with the key kept.
+7. `nexus` moves to `nexusId` only for integers; numeric strings ('19250') convert to int with a report line; anything else ('VectorPlexus', 'manual', '11052+87547') is reported MANUAL with the key kept. Before writing anything, migrate re-validates the migrated data against the pre-existing violation set: a change that would create a NEW violation prints a BLOCKED line and nothing is written — manifest extractions are deferred behind this gate (dry-run predicts save viability the same way; apply exits 2 on BLOCKED).
 
 `migrate` is **dry-run by default** (prints per-entry change report); `--apply` executes with backup-first. Idempotent: second run reports zero changes.
 
@@ -71,6 +73,8 @@ Normalizes the drift-era Skyrim entries:
 | `validate` | Schema pass over header presence + all entries. Exit 0 clean / 1 violations (printed). |
 | `check` | Cross-consistency (below). Exit 0 clean / 1 findings. |
 | `migrate` | As above. |
+
+`add` / `update` / `remove` save with a **scoped pre-existing allowance**: violations that already existed on OTHER entries never block the edit (an imperfect ledger stays incrementally fixable), but the edited entry itself must validate after the change. `add --files-from` writes the manifest file only after the assembled entry validates (no orphan manifests on refused adds).
 
 ## `check` cross-consistency
 

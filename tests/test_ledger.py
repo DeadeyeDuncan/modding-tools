@@ -271,6 +271,15 @@ class AddTests(LedgerTestCase):
         self.assertEqual(code, 2)
         self.assertIn("exists", out)
 
+    def test_add_files_from_bad_date_writes_no_manifest(self):
+        # regression: manifest write must be gated behind entry validation
+        staged = self.root / "staged.txt"
+        staged.write_text("meshes\\f.nif\n", encoding="utf-8")
+        code, _ = self.run_cli("add", "--name", "Mod F", "--files-from", str(staged),
+                               "--installed", "not-a-date")
+        self.assertEqual(code, 2)
+        self.assertFalse((self.manifests / "Mod-F.txt").exists())
+
 
 class UpdateTests(LedgerTestCase):
     def setUp(self):
@@ -313,6 +322,23 @@ class UpdateTests(LedgerTestCase):
         note = self.reload_a()["note"]
         self.assertTrue(note.startswith("replaced\n["))
         self.assertIn("] checked", note)
+
+    def test_scoped_allowance_incremental_fixes(self):
+        # an imperfect ledger must remain incrementally fixable: unrelated
+        # entries' pre-existing violations don't block an edit; the edited
+        # entry's own violations still gate
+        self.write_ledger([
+            {"name": "Mod A"},  # pre-existing violation: missing installed
+            {"name": "Mod B", "installed": "2026-06-20"},
+        ])
+        code, _ = self.run_cli("update", "--name", "Mod B", "--version", "2.0")
+        self.assertEqual(code, 0)
+        code, _ = self.run_cli("add", "--name", "Mod C")
+        self.assertEqual(code, 0)
+        code, _ = self.run_cli("update", "--name", "Mod A", "--installed", "2026-06-21")
+        self.assertEqual(code, 0)
+        code, _ = self.run_cli("validate")
+        self.assertEqual(code, 0)
 
 
 class RemoveTests(LedgerTestCase):
@@ -439,6 +465,82 @@ class MigrateTests(LedgerTestCase):
         mods = json.loads(self.ledger_path.read_bytes().decode("utf-8-sig"))["mods"]
         self.assertNotIn("files", mods[0])
         self.assertEqual(mods[0]["fileCount"], 4754)
+
+    def test_esp_false_dropped_no_plugin(self):
+        # real ledger: "esp": false means "this mod has no plugin"
+        self.write_ledger([{"name": "No Plugin", "installed": "2026-06-20", "esp": False}])
+        code, out = self.run_cli("migrate", "--apply")
+        self.assertEqual(code, 0)
+        self.assertIn("esp=False dropped (no plugin)", out)
+        mods = self.reload()["mods"]
+        self.assertNotIn("esp", mods[0])
+        self.assertNotIn("plugin", mods[0])
+
+    def test_esm_true_manual_key_kept(self):
+        # real ledger: Obsidian carries "esm": true - not a filename, needs a human
+        self.write_ledger([
+            {"name": "Obsidian", "installed": "2026-06-20", "esm": True},
+            {"name": "Old Nexus", "installed": "2026-06-20", "nexus": 111},
+        ])
+        code, out = self.run_cli("migrate", "--apply")
+        self.assertEqual(code, 1)
+        self.assertIn("MANUAL Obsidian: esm=True is not a filename", out)
+        mods = {e["name"]: e for e in self.reload()["mods"]}
+        self.assertEqual(mods["Obsidian"]["esm"], True)
+        self.assertNotIn("plugin", mods["Obsidian"])
+        self.assertEqual(mods["Old Nexus"]["nexusId"], 111)  # save still happened
+
+    def test_nexus_string_typed(self):
+        self.write_ledger([
+            {"name": "Str Digit", "installed": "2026-06-20", "nexus": "19250"},
+            {"name": "Str Word", "installed": "2026-06-20", "nexus": "VectorPlexus"},
+        ])
+        code, out = self.run_cli("migrate", "--apply")
+        self.assertEqual(code, 1)
+        self.assertIn("nexus '19250' -> nexusId 19250", out)
+        self.assertIn("MANUAL Str Word: nexus='VectorPlexus' not an integer", out)
+        mods = {e["name"]: e for e in self.reload()["mods"]}
+        self.assertEqual(mods["Str Digit"]["nexusId"], 19250)
+        self.assertNotIn("nexus", mods["Str Digit"])
+        self.assertEqual(mods["Str Word"]["nexus"], "VectorPlexus")
+        self.assertNotIn("nexusId", mods["Str Word"])
+
+    def _inject_on_second_validate(self):
+        real = ledger.validate_data
+        state = {"n": 0}
+
+        def fake(data):
+            state["n"] += 1
+            out = real(data)
+            if state["n"] == 2:
+                return out + ["Injected: synthetic new violation"]
+            return out
+        return fake
+
+    def test_dry_run_blocked_simulation(self):
+        self.write_ledger(self.drift_mods())
+        before = self.ledger_path.read_bytes()
+        from unittest import mock
+        with mock.patch.object(ledger, "validate_data",
+                               side_effect=self._inject_on_second_validate()):
+            code, out = self.run_cli("migrate")
+        self.assertEqual(code, 1)
+        self.assertIn("BLOCKED: would create violation: Injected: synthetic new violation", out)
+        self.assertEqual(self.ledger_path.read_bytes(), before)
+
+    def test_blocked_apply_writes_nothing(self):
+        self.write_ledger(self.drift_mods())
+        before = self.ledger_path.read_bytes()
+        manifests_before = {p.name for p in self.manifests.iterdir()}
+        from unittest import mock
+        with mock.patch.object(ledger, "validate_data",
+                               side_effect=self._inject_on_second_validate()):
+            code, out = self.run_cli("migrate", "--apply")
+        self.assertEqual(code, 2)
+        self.assertIn("BLOCKED", out)
+        self.assertEqual(self.ledger_path.read_bytes(), before)
+        # regression: no orphan manifest may spill before the save gate
+        self.assertEqual({p.name for p in self.manifests.iterdir()}, manifests_before)
 
 
 class CheckTests(LedgerTestCase):

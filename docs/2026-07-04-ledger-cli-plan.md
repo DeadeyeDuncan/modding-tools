@@ -1103,7 +1103,85 @@ class MigrateTests(LedgerTestCase):
         mods = json.loads(self.ledger_path.read_bytes().decode("utf-8-sig"))["mods"]
         self.assertNotIn("files", mods[0])
         self.assertEqual(mods[0]["fileCount"], 4754)
+
+    def test_esp_false_dropped_no_plugin(self):
+        # real ledger: "esp": false means "this mod has no plugin"
+        self.write_ledger([{"name": "No Plugin", "installed": "2026-06-20", "esp": False}])
+        code, out = self.run_cli("migrate", "--apply")
+        self.assertEqual(code, 0)
+        self.assertIn("esp=False dropped (no plugin)", out)
+        mods = self.reload()["mods"]
+        self.assertNotIn("esp", mods[0])
+        self.assertNotIn("plugin", mods[0])
+
+    def test_esm_true_manual_key_kept(self):
+        # real ledger: Obsidian carries "esm": true - not a filename, needs a human
+        self.write_ledger([
+            {"name": "Obsidian", "installed": "2026-06-20", "esm": True},
+            {"name": "Old Nexus", "installed": "2026-06-20", "nexus": 111},
+        ])
+        code, out = self.run_cli("migrate", "--apply")
+        self.assertEqual(code, 1)
+        self.assertIn("MANUAL Obsidian: esm=True is not a filename", out)
+        mods = {e["name"]: e for e in self.reload()["mods"]}
+        self.assertEqual(mods["Obsidian"]["esm"], True)
+        self.assertNotIn("plugin", mods["Obsidian"])
+        self.assertEqual(mods["Old Nexus"]["nexusId"], 111)  # save still happened
+
+    def test_nexus_string_typed(self):
+        self.write_ledger([
+            {"name": "Str Digit", "installed": "2026-06-20", "nexus": "19250"},
+            {"name": "Str Word", "installed": "2026-06-20", "nexus": "VectorPlexus"},
+        ])
+        code, out = self.run_cli("migrate", "--apply")
+        self.assertEqual(code, 1)
+        self.assertIn("nexus '19250' -> nexusId 19250", out)
+        self.assertIn("MANUAL Str Word: nexus='VectorPlexus' not an integer", out)
+        mods = {e["name"]: e for e in self.reload()["mods"]}
+        self.assertEqual(mods["Str Digit"]["nexusId"], 19250)
+        self.assertNotIn("nexus", mods["Str Digit"])
+        self.assertEqual(mods["Str Word"]["nexus"], "VectorPlexus")
+        self.assertNotIn("nexusId", mods["Str Word"])
+
+    def _inject_on_second_validate(self):
+        real = ledger.validate_data
+        state = {"n": 0}
+
+        def fake(data):
+            state["n"] += 1
+            out = real(data)
+            if state["n"] == 2:
+                return out + ["Injected: synthetic new violation"]
+            return out
+        return fake
+
+    def test_dry_run_blocked_simulation(self):
+        self.write_ledger(self.drift_mods())
+        before = self.ledger_path.read_bytes()
+        from unittest import mock
+        with mock.patch.object(ledger, "validate_data",
+                               side_effect=self._inject_on_second_validate()):
+            code, out = self.run_cli("migrate")
+        self.assertEqual(code, 1)
+        self.assertIn("BLOCKED: would create violation: Injected: synthetic new violation", out)
+        self.assertEqual(self.ledger_path.read_bytes(), before)
+
+    def test_blocked_apply_writes_nothing(self):
+        self.write_ledger(self.drift_mods())
+        before = self.ledger_path.read_bytes()
+        manifests_before = {p.name for p in self.manifests.iterdir()}
+        from unittest import mock
+        with mock.patch.object(ledger, "validate_data",
+                               side_effect=self._inject_on_second_validate()):
+            code, out = self.run_cli("migrate", "--apply")
+        self.assertEqual(code, 2)
+        self.assertIn("BLOCKED", out)
+        self.assertEqual(self.ledger_path.read_bytes(), before)
+        # regression: no orphan manifest may spill before the save gate
+        self.assertEqual({p.name for p in self.manifests.iterdir()}, manifests_before)
 ```
+
+(Scoped-allowance and gated-manifest-write regression tests live in the Task 4/5 suites: `AddTests.test_add_files_from_bad_date_writes_no_manifest`, `UpdateTests.test_scoped_allowance_incremental_fixes`.)
 
 Note: `test_apply_*` write through `save_ledger`, which requires a valid result — but the "No Date" entry stays invalid (`installed` missing). Migration must therefore write via a **relaxed save** that tolerates exactly the violations it reported as MANUAL. Implementation handles this by snapshotting the ledger's pre-existing violations before migration and passing them as `allow_violations` — migration may not introduce NEW violations, but violations that predate it pass through.
 
@@ -1133,24 +1211,33 @@ def save_ledger(path, data, allow_violations=()):
 Add to `ledger.py`:
 
 ```python
-def migrate_data(data, ledger_path, apply):
-    """Normalize drift-era fields. Returns (report_lines, manual_lines).
+def migrate_data(data, ledger_path):
+    """Normalize drift-era fields. Returns (report_lines, manual_lines, pending_writes).
 
-    report_lines: changes made (or would be made); manual_lines: things a human
-    must fix (e.g. missing installed dates).
+    report_lines: changes made (or that would be made); manual_lines: things a
+    human must fix (e.g. missing installed dates); pending_writes: (name, paths)
+    manifest extractions, deferred so nothing touches disk until the migrated
+    ledger is known to validate.
     """
-    report, manual = [], []
+    report, manual, pending = [], [], []
     for e in data["mods"]:
         if not isinstance(e, dict):
             continue
         label = e.get("name", "?")
         if "nexus" in e:
-            if "nexusId" in e and e["nexusId"] != e["nexus"]:
-                manual.append(f"SKIP {label}: nexus={e['nexus']} conflicts nexusId={e['nexusId']}")
-            else:
-                e.setdefault("nexusId", e["nexus"])
+            value = e["nexus"]
+            if "nexusId" in e and e["nexusId"] != value:
+                manual.append(f"SKIP {label}: nexus={value} conflicts nexusId={e['nexusId']}")
+            elif isinstance(value, int) and not isinstance(value, bool):
+                e.setdefault("nexusId", value)
                 del e["nexus"]
                 report.append(f"{label}: nexus -> nexusId")
+            elif isinstance(value, str) and value.isdigit():
+                e["nexusId"] = int(value)
+                del e["nexus"]
+                report.append(f"{label}: nexus '{value}' -> nexusId {int(value)}")
+            else:
+                manual.append(f"MANUAL {label}: nexus={value!r} not an integer - resolve manually")
         if "notes" in e:
             if e.get("note"):
                 e["note"] = e["note"] + "\n" + str(e["notes"])
@@ -1160,28 +1247,33 @@ def migrate_data(data, ledger_path, apply):
             report.append(f"{label}: notes -> note")
         for alias in ("esp", "esm"):
             if alias in e:
-                if e.get("plugin") and e["plugin"] != e[alias]:
-                    manual.append(f"SKIP {label}: {alias}={e[alias]!r} conflicts plugin={e['plugin']!r}")
-                else:
-                    e["plugin"] = e[alias]
+                value = e[alias]
+                if isinstance(value, str) and value.strip():
+                    if e.get("plugin") and e["plugin"] != value:
+                        manual.append(f"SKIP {label}: {alias}={value!r} conflicts plugin={e['plugin']!r}")
+                    else:
+                        e["plugin"] = value
+                        del e[alias]
+                        report.append(f"{label}: {alias} -> plugin ({value!r})")
+                elif value is False or value is None:
                     del e[alias]
-                    report.append(f"{label}: {alias} -> plugin")
+                    report.append(f"{label}: {alias}={value!r} dropped (no plugin)")
+                else:
+                    manual.append(f"MANUAL {label}: {alias}={value!r} is not a filename - resolve manually")
         if "files" in e and "manifest" in e:
             manual.append(f"SKIP {label}: has both 'files' and 'manifest' ({e['manifest']!r}) - review manually")
         elif isinstance(e.get("files"), str) and e["files"].strip():
             manual.append(f"MANUAL {label}: 'files' is prose text, not a list - convert manually")
         elif isinstance(e.get("files"), list) and e["files"]:
             try:
-                if apply:
-                    pointer, count = write_manifest(ledger_path, label, e["files"])
-                else:
-                    pointer, count = f"manifests\\{sanitize_name(label)}.txt", len(e["files"])
-                    mdir = Path(ledger_path).parent / "manifests"
-                    target = mdir / (sanitize_name(label) + ".txt")
-                    if target.exists():
-                        existing = target.read_bytes().decode("utf-8-sig").replace("\r\n", "\n").strip()
-                        if existing != "\n".join(e["files"]).strip():
-                            raise LedgerError(f"manifest already exists with different content: {target}")
+                fname = sanitize_name(label) + ".txt"
+                pointer, count = f"manifests\\{fname}", len(e["files"])
+                target = Path(ledger_path).parent / "manifests" / fname
+                if target.exists():
+                    existing = target.read_bytes().decode("utf-8-sig").replace("\r\n", "\n").strip()
+                    if existing != "\n".join(e["files"]).strip():
+                        raise LedgerError(f"manifest already exists with different content: {target}")
+                pending.append((label, e["files"]))
                 e["manifest"] = pointer
                 e["fileCount"] = count
                 del e["files"]
@@ -1194,7 +1286,7 @@ def migrate_data(data, ledger_path, apply):
         if "installed" not in e:
             manual.append(f"MANUAL {label}: no 'installed' date - backfill with "
                           f"`update --name \"{label}\" --installed YYYY-MM-DD`")
-    return report, manual
+    return report, manual, pending
 
 
 def cmd_migrate(args):
@@ -1202,14 +1294,24 @@ def cmd_migrate(args):
     data = load_ledger(path)
     pre_existing = validate_data(data)  # violations that predate migration (e.g. missing installed dates)
     work = data if args.apply else copy.deepcopy(data)
-    report, manual = migrate_data(work, path, apply=args.apply)
+    report, manual, pending = migrate_data(work, path)
     for line in report:
         safe_print(("" if args.apply else "would: ") + line)
     for line in manual:
         safe_print(line)
-    safe_print(f"{len(report)} change(s), {len(manual)} manual item(s)"
+    # save-gate simulation: migration may not introduce NEW violations; both
+    # modes report BLOCKED lines, and nothing (manifests included) is written
+    new_violations = [v for v in validate_data(work) if v not in set(pre_existing)]
+    for v in new_violations:
+        safe_print(f"BLOCKED: would create violation: {v}")
+    safe_print(f"{len(report)} change(s), {len(manual)} manual item(s), "
+               f"{len(new_violations)} blocked"
                + ("" if args.apply else " [dry-run - use --apply]"))
+    if new_violations:
+        return 2 if args.apply else 1
     if args.apply and report:
+        for name, paths in pending:
+            write_manifest(path, name, paths)
         save_ledger(path, work, allow_violations=pre_existing)
     return 1 if manual else 0
 ```
@@ -1518,7 +1620,7 @@ py -3 C:\Modding\tools\ledger.py validate --game skyrim
 py -3 C:\Modding\tools\ledger.py validate --game cp77
 ```
 
-Expected: Skyrim reports violations on drift-era entries (8 missing `installed`, alias fields are NOT violations — aliases are unknown keys until migrated); CP77 clean (exit 0).
+Expected: Skyrim reports 15 pre-existing violations (8 missing `installed` + 5 string `nexusId` + 1 duplicate name + 1 prose `removed` date; alias fields are NOT violations — aliases are unknown keys until migrated); CP77 clean (exit 0).
 
 - [ ] **Step 3: Migrate dry-run on the real Skyrim ledger (read-only)**
 
@@ -1526,7 +1628,7 @@ Expected: Skyrim reports violations on drift-era entries (8 missing `installed`,
 py -3 C:\Modding\tools\ledger.py migrate --game skyrim
 ```
 
-Expected: ~40 `nexus -> nexusId`, ~6 `notes -> note`, ~13 `esp/esm -> plugin`, ~41 inline-files extractions, 8 MANUAL missing-date lines (entries #153–160: CBPC, HIMBO, TNG, TNG TRX, Floppy Schlongs, SkySight, Lucid, TNG Racial Variances), plus SKIP/MANUAL lines for the 14 files+manifest co-presence entries and any prose-string files fields — all reviewed by the user before apply. **Present the full report to the user. STOP for approval before Step 4.**
+Expected: ~40 `nexus -> nexusId` moves (numeric-string values convert to int with a `nexus '<s>' -> nexusId <n>` line; non-numeric values like 'VectorPlexus'/'manual' become MANUAL lines), ~6 `notes -> note`, the 13 boolean `esp`/`esm` values become `dropped (no plugin)` report lines (False) or MANUAL lines (True — Obsidian's esm), inline-files extractions, 8 MANUAL missing-date lines (entries #153–160: CBPC, HIMBO, TNG, TNG TRX, Floppy Schlongs, SkySight, Lucid, TNG Racial Variances), plus SKIP/MANUAL lines for the 14 files+manifest co-presence entries and any prose-string files fields, and `empty 'files' dropped` lines for the 11 empty-files entries. Any BLOCKED lines (`would create violation`) mean migration would corrupt the ledger — must be zero before apply. All reviewed by the user before apply. **Present the full report to the user. STOP for approval before Step 4.**
 
 - [ ] **Step 4: Apply (after user approval)**
 
@@ -1535,7 +1637,7 @@ py -3 C:\Modding\tools\ledger.py migrate --game skyrim --apply
 py -3 C:\Modding\tools\ledger.py validate --game skyrim
 ```
 
-Expected: apply exits 1 (8 manual items outstanding); backup exists in `C:\Modding\skyrim-manual\backups\`.
+Expected: apply exits 1 with the save SUCCEEDING (manual items outstanding: 8 missing dates, non-numeric nexus values, co-presence SKIPs, prose-files MANUALs — none of them block the write; only BLOCKED lines would, exiting 2 with nothing written); backup exists in `C:\Modding\skyrim-manual\backups\`.
 
 - [ ] **Step 5: Backfill the 8 missing dates from wiki evidence**
 
@@ -1554,7 +1656,7 @@ py -3 C:\Modding\tools\ledger.py update --game skyrim --name "TNG Racial Penis V
 
 (Confirm each date against the wiki articles before running; adjust if an article says otherwise. These entries pre-date manifests — several were removed/swapped later per wiki; their alias-era `esp` fields become `plugin` in migration.)
 
-Then: `py -3 C:\Modding\tools\ledger.py validate --game skyrim` → Expected: exit 0, `0 violation(s)`.
+Then: `py -3 C:\Modding\tools\ledger.py validate --game skyrim` → Expected: exit 1 with exactly 7 legacy violations remaining (5 string `nexusId` + 1 duplicate name + 1 prose `removed` date) — these pre-date the tool and await user cleanup decisions; they do not block incremental edits thanks to the scoped pre-existing allowance in add/update/remove.
 
 - [ ] **Step 6: Live consistency check**
 
