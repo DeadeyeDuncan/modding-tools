@@ -343,5 +343,66 @@ class RemoveTests(LedgerTestCase):
         self.assertIn("already removed", out)
 
 
+class MigrateTests(LedgerTestCase):
+    def drift_mods(self):
+        return [
+            {"name": "Old Nexus", "installed": "2026-06-20", "nexus": 111},
+            {"name": "Old Notes", "installed": "2026-06-20", "notes": "legacy text"},
+            {"name": "Old Esp", "installed": "2026-06-20", "esp": "old.esp"},
+            {"name": "Inline Files", "installed": "2026-06-20",
+             "files": ["meshes\\x.nif", "textures\\y.dds"], "fileCount": 2},
+            {"name": "No Date", "nexus": 222, "note": "missing installed"},
+            {"name": "Clean", "installed": "2026-06-21", "nexusId": 333},
+        ]
+
+    def reload(self):
+        return json.loads(self.ledger_path.read_bytes().decode("utf-8-sig"))
+
+    def test_dry_run_reports_but_does_not_write(self):
+        self.write_ledger(self.drift_mods())
+        before = self.ledger_path.read_bytes()
+        code, out = self.run_cli("migrate")
+        self.assertEqual(code, 1)
+        self.assertIn("nexus -> nexusId", out)
+        self.assertIn("MANUAL", out)  # the No Date entry
+        self.assertEqual(self.ledger_path.read_bytes(), before)
+        self.assertFalse((self.manifests / "Inline-Files.txt").exists())
+
+    def test_apply_normalizes(self):
+        self.write_ledger(self.drift_mods())
+        code, out = self.run_cli("migrate", "--apply")
+        # exit 1: the No Date entry still needs manual backfill
+        self.assertEqual(code, 1)
+        mods = {e["name"]: e for e in self.reload()["mods"]}
+        self.assertEqual(mods["Old Nexus"]["nexusId"], 111)
+        self.assertNotIn("nexus", mods["Old Nexus"])
+        self.assertEqual(mods["Old Notes"]["note"], "legacy text")
+        self.assertNotIn("notes", mods["Old Notes"])
+        self.assertEqual(mods["Old Esp"]["plugin"], "old.esp")
+        self.assertNotIn("esp", mods["Old Esp"])
+        self.assertEqual(mods["Inline Files"]["manifest"], "manifests\\Inline-Files.txt")
+        self.assertNotIn("files", mods["Inline Files"])
+        raw = (self.manifests / "Inline-Files.txt").read_bytes()
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
+        self.assertIn(b"meshes\\x.nif\r\n", raw)
+        # No Date: aliases normalized but installed still absent
+        self.assertEqual(mods["No Date"]["nexusId"], 222)
+        self.assertNotIn("installed", mods["No Date"])
+
+    def test_apply_idempotent(self):
+        self.write_ledger(self.drift_mods())
+        self.run_cli("migrate", "--apply")
+        code, out = self.run_cli("migrate")
+        self.assertNotIn("->", out)
+
+    def test_manifest_collision_skips_entry(self):
+        (self.manifests / "Inline-Files.txt").write_bytes(b"\xef\xbb\xbfdifferent\r\n")
+        self.write_ledger(self.drift_mods())
+        code, out = self.run_cli("migrate", "--apply")
+        self.assertIn("SKIP", out)
+        mods = {e["name"]: e for e in self.reload()["mods"]}
+        self.assertIn("files", mods["Inline Files"])  # untouched
+
+
 if __name__ == "__main__":
     unittest.main()

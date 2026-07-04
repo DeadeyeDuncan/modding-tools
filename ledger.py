@@ -276,6 +276,80 @@ def cmd_remove(args):
     return 0
 
 
+def migrate_data(data, ledger_path, apply):
+    """Normalize drift-era fields. Returns (report_lines, manual_lines).
+
+    report_lines: changes made (or would be made); manual_lines: things a human
+    must fix (e.g. missing installed dates).
+    """
+    report, manual = [], []
+    for e in data["mods"]:
+        if not isinstance(e, dict):
+            continue
+        label = e.get("name", "?")
+        if "nexus" in e:
+            if "nexusId" in e and e["nexusId"] != e["nexus"]:
+                manual.append(f"SKIP {label}: nexus={e['nexus']} conflicts nexusId={e['nexusId']}")
+            else:
+                e.setdefault("nexusId", e["nexus"])
+                del e["nexus"]
+                report.append(f"{label}: nexus -> nexusId")
+        if "notes" in e:
+            if e.get("note"):
+                e["note"] = e["note"] + "\n" + str(e["notes"])
+            else:
+                e["note"] = str(e["notes"])
+            del e["notes"]
+            report.append(f"{label}: notes -> note")
+        for alias in ("esp", "esm"):
+            if alias in e:
+                if e.get("plugin") and e["plugin"] != e[alias]:
+                    manual.append(f"SKIP {label}: {alias}={e[alias]!r} conflicts plugin={e['plugin']!r}")
+                else:
+                    e["plugin"] = e[alias]
+                    del e[alias]
+                    report.append(f"{label}: {alias} -> plugin")
+        if isinstance(e.get("files"), list) and e["files"]:
+            try:
+                if apply:
+                    pointer, count = write_manifest(ledger_path, label, e["files"])
+                else:
+                    pointer, count = f"manifests\\{sanitize_name(label)}.txt", len(e["files"])
+                    mdir = Path(ledger_path).parent / "manifests"
+                    target = mdir / (sanitize_name(label) + ".txt")
+                    if target.exists():
+                        existing = target.read_bytes().decode("utf-8-sig").replace("\r\n", "\n").strip()
+                        if existing != "\n".join(e["files"]).strip():
+                            raise LedgerError(f"manifest already exists with different content: {target}")
+                e["manifest"] = pointer
+                e["fileCount"] = count
+                del e["files"]
+                report.append(f"{label}: {count} inline files -> {pointer}")
+            except LedgerError as ex:
+                manual.append(f"SKIP {label}: {ex}")
+        if "installed" not in e:
+            manual.append(f"MANUAL {label}: no 'installed' date - backfill with "
+                          f"`update --name \"{label}\" --installed YYYY-MM-DD`")
+    return report, manual
+
+
+def cmd_migrate(args):
+    path = _resolve_ledger(args)
+    data = load_ledger(path)
+    pre_existing = validate_data(data)  # violations that predate migration (e.g. missing installed dates)
+    work = data if args.apply else copy.deepcopy(data)
+    report, manual = migrate_data(work, path, apply=args.apply)
+    for line in report:
+        safe_print(("" if args.apply else "would: ") + line)
+    for line in manual:
+        safe_print(line)
+    safe_print(f"{len(report)} change(s), {len(manual)} manual item(s)"
+               + ("" if args.apply else " [dry-run - use --apply]"))
+    if args.apply and report:
+        save_ledger(path, work, allow_violations=pre_existing)
+    return 1 if manual else 0
+
+
 def cmd_get(args):
     data = load_ledger(_resolve_ledger(args))
     e = find_entry(data, args.name)
@@ -377,6 +451,10 @@ def build_parser():
     sp.add_argument("--reason", required=True)
     sp.add_argument("--to", help="backup path the files were moved to")
     sp.set_defaults(func=cmd_remove)
+
+    sp = sub.add_parser("migrate", parents=[common])
+    sp.add_argument("--apply", action="store_true", help="execute (default: dry-run)")
+    sp.set_defaults(func=cmd_migrate)
     return p
 
 
