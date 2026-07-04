@@ -86,6 +86,40 @@ def validate_data(data):
     return v
 
 
+def load_ledger(path):
+    path = Path(path)
+    if not path.is_file():
+        raise LedgerError(f"ledger not found: {path}")
+    try:
+        return json.loads(path.read_bytes().decode("utf-8-sig"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as ex:
+        raise LedgerError(f"ledger unparseable: {path}: {ex}")
+
+
+def save_ledger(path, data, allow_violations=()):
+    """Validate -> backup -> write temp -> atomic replace. Never partial.
+
+    allow_violations: exact violation strings tolerated (used by migrate for
+    pre-existing MANUAL items it just reported).
+    """
+    path = Path(path)
+    violations = [v for v in validate_data(data) if v not in set(allow_violations)]
+    if violations:
+        raise LedgerError("refusing to write invalid ledger:\n  " + "\n  ".join(violations))
+    backups = path.parent / "backups"
+    backups.mkdir(exist_ok=True)
+    if path.is_file():
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        shutil.copy2(path, backups / f"{path.name}.bak-{stamp}")
+        old = sorted(backups.glob(f"{path.name}.bak-*"))
+        for stale in old[:-BACKUP_KEEP]:
+            stale.unlink()
+    text = json.dumps(data, indent=4, ensure_ascii=False).replace("\n", "\r\n") + "\r\n"
+    tmp = path.parent / f"{path.name}.tmp-{os.getpid()}"
+    tmp.write_bytes(text.encode("utf-8"))
+    os.replace(tmp, path)
+
+
 def safe_print(s):
     try:
         print(s)

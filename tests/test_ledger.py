@@ -108,5 +108,46 @@ class ValidateTests(LedgerTestCase):
         self.assertEqual(v, [])
 
 
+class IoTests(LedgerTestCase):
+    def entry(self):
+        return {"name": "Mod A", "installed": "2026-07-01"}
+
+    def test_load_roundtrip_and_bom(self):
+        self.write_ledger([self.entry()])
+        # also tolerate a BOM on read
+        self.ledger_path.write_bytes(b"\xef\xbb\xbf" + self.ledger_path.read_bytes())
+        data = ledger.load_ledger(self.ledger_path)
+        self.assertEqual(data["mods"][0]["name"], "Mod A")
+
+    def test_save_writes_crlf_no_bom_indent4(self):
+        self.write_ledger([self.entry()])
+        data = ledger.load_ledger(self.ledger_path)
+        ledger.save_ledger(self.ledger_path, data)
+        raw = self.ledger_path.read_bytes()
+        self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
+        self.assertIn(b'\r\n    "game"', raw)
+
+    def test_save_creates_backup_and_prunes(self):
+        self.write_ledger([self.entry()])
+        data = ledger.load_ledger(self.ledger_path)
+        for _ in range(25):
+            ledger.save_ledger(self.ledger_path, data)
+        baks = list((self.root / "backups").glob("ledger.json.bak-*"))
+        self.assertTrue(0 < len(baks) <= ledger.BACKUP_KEEP)
+
+    def test_save_rejects_invalid_and_leaves_original(self):
+        self.write_ledger([self.entry()])
+        before = self.ledger_path.read_bytes()
+        bad = ledger.load_ledger(self.ledger_path)
+        bad["mods"].append({"note": "nameless"})
+        with self.assertRaises(ledger.LedgerError):
+            ledger.save_ledger(self.ledger_path, bad)
+        self.assertEqual(self.ledger_path.read_bytes(), before)
+
+    def test_load_missing_file_raises(self):
+        with self.assertRaises(ledger.LedgerError):
+            ledger.load_ledger(self.root / "nope.json")
+
+
 if __name__ == "__main__":
     unittest.main()
