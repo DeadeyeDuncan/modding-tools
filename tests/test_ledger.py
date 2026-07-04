@@ -1,7 +1,9 @@
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -34,6 +36,12 @@ class LedgerTestCase(unittest.TestCase):
         text = json.dumps(data, indent=4).replace("\n", "\r\n")
         self.ledger_path.write_bytes(text.encode("utf-8"))
         return data
+
+    def run_cli(self, *argv):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = ledger.main(["--ledger", str(self.ledger_path), *argv])
+        return code, buf.getvalue()
 
 
 if __name__ == "__main__":

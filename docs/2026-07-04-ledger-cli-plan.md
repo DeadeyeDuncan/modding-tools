@@ -146,7 +146,7 @@ if __name__ == "__main__":
 - [ ] **Step 3: Verify the test scaffold runs**
 
 Run: `py -3 -m unittest discover -s C:\Modding\tools\tests -v`
-Expected: `Ran 0 tests ... OK` (no tests yet, imports succeed)
+Expected: `Ran 0 tests` and imports succeed. On Python 3.12+ zero collected tests prints `NO TESTS RAN` with exit code 5 (older Pythons printed `OK`/exit 0) — this is expected and transient until Task 1 adds real tests.
 
 - [ ] **Step 4: Commit**
 
@@ -421,10 +421,6 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 Append to `test_ledger.py`:
 
 ```python
-import io
-from contextlib import redirect_stdout
-
-
 class CliReadTests(LedgerTestCase):
     def setUp(self):
         super().setUp()
@@ -433,12 +429,6 @@ class CliReadTests(LedgerTestCase):
             {"name": "Mod B", "installed": "2026-07-01", "removed": "2026-07-02",
              "removedReason": "broke saves"},
         ])
-
-    def run_cli(self, *argv):
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            code = ledger.main(["--ledger", str(self.ledger_path), *argv])
-        return code, buf.getvalue()
 
     def test_get_prints_entry_json(self):
         code, out = self.run_cli("get", "--name", "mod a")
@@ -629,14 +619,6 @@ class AddTests(LedgerTestCase):
         super().setUp()
         self.write_ledger([{"name": "Mod A", "installed": "2026-06-20"}])
 
-    def run_cli(self, *argv):
-        import io
-        from contextlib import redirect_stdout
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            code = ledger.main(["--ledger", str(self.ledger_path), *argv])
-        return code, buf.getvalue()
-
     def reload(self):
         return json.loads(self.ledger_path.read_bytes().decode("utf-8-sig"))
 
@@ -803,14 +785,6 @@ class UpdateTests(LedgerTestCase):
         self.write_ledger([{"name": "Mod A", "installed": "2026-06-20",
                             "version": "1.0", "note": "first"}])
 
-    def run_cli(self, *argv):
-        import io
-        from contextlib import redirect_stdout
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            code = ledger.main(["--ledger", str(self.ledger_path), *argv])
-        return code, buf.getvalue()
-
     def reload_a(self):
         data = json.loads(self.ledger_path.read_bytes().decode("utf-8-sig"))
         return data["mods"][0]
@@ -920,14 +894,6 @@ class RemoveTests(LedgerTestCase):
         super().setUp()
         self.write_ledger([{"name": "Mod A", "installed": "2026-06-20"}])
 
-    def run_cli(self, *argv):
-        import io
-        from contextlib import redirect_stdout
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            code = ledger.main(["--ledger", str(self.ledger_path), *argv])
-        return code, buf.getvalue()
-
     def test_remove_sets_fields_keeps_entry(self):
         code, _ = self.run_cli("remove", "--name", "Mod A",
                                "--reason", "caused CTD",
@@ -1028,14 +994,6 @@ class MigrateTests(LedgerTestCase):
             {"name": "No Date", "nexus": 222, "note": "missing installed"},
             {"name": "Clean", "installed": "2026-06-21", "nexusId": 333},
         ]
-
-    def run_cli(self, *argv):
-        import io
-        from contextlib import redirect_stdout
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            code = ledger.main(["--ledger", str(self.ledger_path), *argv])
-        return code, buf.getvalue()
 
     def reload(self):
         return json.loads(self.ledger_path.read_bytes().decode("utf-8-sig"))
@@ -1225,14 +1183,6 @@ Append to `test_ledger.py`:
 
 ```python
 class CheckTests(LedgerTestCase):
-    def run_cli(self, *argv):
-        import io
-        from contextlib import redirect_stdout
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            code = ledger.main(["--ledger", str(self.ledger_path), *argv])
-        return code, buf.getvalue()
-
     def make_manifest(self, name, paths, create_files=True):
         body = "\r\n".join(paths) + "\r\n"
         (self.manifests / name).write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
