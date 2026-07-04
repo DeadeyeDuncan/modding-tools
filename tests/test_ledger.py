@@ -44,5 +44,56 @@ class LedgerTestCase(unittest.TestCase):
         return code, buf.getvalue()
 
 
+class ValidateTests(LedgerTestCase):
+    def ok_entry(self, **over):
+        e = {"name": "Mod A", "installed": "2026-07-01", "nexusId": 123,
+             "plugin": "ModA.esp", "note": "fine"}
+        e.update(over)
+        return e
+
+    def test_clean_ledger_passes(self):
+        data = {"game": "x", "mods": [self.ok_entry()]}
+        self.assertEqual(ledger.validate_data(data), [])
+
+    def test_root_must_have_mods_list(self):
+        self.assertTrue(ledger.validate_data({"game": "x"}))
+        self.assertTrue(ledger.validate_data([]))
+
+    def test_missing_name_and_installed(self):
+        v = ledger.validate_data({"mods": [{"note": "no name"}]})
+        self.assertTrue(any("name" in x for x in v))
+        self.assertTrue(any("installed" in x for x in v))
+
+    def test_duplicate_name_case_insensitive(self):
+        v = ledger.validate_data({"mods": [self.ok_entry(), self.ok_entry(name="mod a")]})
+        self.assertTrue(any("duplicate" in x for x in v))
+
+    def test_removed_requires_reason(self):
+        v = ledger.validate_data({"mods": [self.ok_entry(removed="2026-07-02")]})
+        self.assertTrue(any("removedReason" in x for x in v))
+        v2 = ledger.validate_data({"mods": [self.ok_entry(
+            removed="2026-07-02", removedReason="broke saves")]})
+        self.assertEqual(v2, [])
+
+    def test_bad_date_format(self):
+        v = ledger.validate_data({"mods": [self.ok_entry(installed="July 1")]})
+        self.assertTrue(any("YYYY-MM-DD" in x for x in v))
+
+    def test_known_field_types(self):
+        v = ledger.validate_data({"mods": [self.ok_entry(fileCount="12")]})
+        self.assertTrue(any("fileCount" in x for x in v))
+        v = ledger.validate_data({"mods": [self.ok_entry(fileCount=True)]})
+        self.assertTrue(any("fileCount" in x for x in v))
+        v = ledger.validate_data({"mods": [self.ok_entry(plugin=["A.esp", "B.esl"])]})
+        self.assertEqual(v, [])
+        v = ledger.validate_data({"mods": [self.ok_entry(plugin=7)]})
+        self.assertTrue(any("plugin" in x for x in v))
+
+    def test_unknown_fields_ignored(self):
+        v = ledger.validate_data({"mods": [self.ok_entry(
+            facegenSkipped=True, tool=True, mods=["sub1"], aka="alias")]})
+        self.assertEqual(v, [])
+
+
 if __name__ == "__main__":
     unittest.main()
