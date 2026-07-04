@@ -1044,7 +1044,7 @@ class MigrateTests(LedgerTestCase):
         self.assertIn("files", mods["Inline Files"])  # untouched
 ```
 
-Note: `test_apply_*` write through `save_ledger`, which requires a valid result — but the "No Date" entry stays invalid (`installed` missing). Migration must therefore write via a **relaxed save** that tolerates exactly the violations it reported as MANUAL. Implementation below handles this with an `allow_violations` parameter.
+Note: `test_apply_*` write through `save_ledger`, which requires a valid result — but the "No Date" entry stays invalid (`installed` missing). Migration must therefore write via a **relaxed save** that tolerates exactly the violations it reported as MANUAL. Implementation handles this by snapshotting the ledger's pre-existing violations before migration and passing them as `allow_violations` — migration may not introduce NEW violations, but violations that predate it pass through.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -1132,6 +1132,7 @@ def migrate_data(data, ledger_path, apply):
 def cmd_migrate(args):
     path = _resolve_ledger(args)
     data = load_ledger(path)
+    pre_existing = validate_data(data)  # violations that predate migration (e.g. missing installed dates)
     work = data if args.apply else copy.deepcopy(data)
     report, manual = migrate_data(work, path, apply=args.apply)
     for line in report:
@@ -1141,9 +1142,7 @@ def cmd_migrate(args):
     safe_print(f"{len(report)} change(s), {len(manual)} manual item(s)"
                + ("" if args.apply else " [dry-run - use --apply]"))
     if args.apply and report:
-        allowed = [v for v in validate_data(work)
-                   if "'installed' missing" in v]
-        save_ledger(path, work, allow_violations=allowed)
+        save_ledger(path, work, allow_violations=pre_existing)
     return 1 if manual else 0
 ```
 
@@ -1475,4 +1474,4 @@ Add a pointer in the Skyrim game project memory (`C:\Users\auand\.claude\project
 
 - Spec coverage: layout/invocation (T0, T3), schema (T1), migration (T7 + T9), commands (T3–T8), check severities incl. swap-pattern INFO (T8), safety/atomicity/backups/prune (T2), encoding/CRLF/indent-4 normalize (T2), ASCII-safe output (T0 `safe_print`), exit codes (T3 `main`), acceptance incl. dry-run gate (T9). Non-goals respected (no file installs).
 - Type consistency: `find_entry`, `_resolve_ledger`, `_entry_line`, `_plugin_value`, `write_manifest(ledger_path, name, paths)`, `save_ledger(path, data, allow_violations=())` used consistently across tasks.
-- Known deliberate deviation: `save_ledger` gains `allow_violations` (not in spec) so migrate can persist normalization while the 8 undated entries await manual backfill — without it, migrate could not write at all. Scoped to exact reported violation strings.
+- Known deliberate deviation: `save_ledger` gains `allow_violations` (not in spec) so migrate can persist normalization while the 8 undated entries await manual backfill — without it, migrate could not write at all. Scoped to the exact violation strings that pre-existed migration.

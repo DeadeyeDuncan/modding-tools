@@ -94,6 +94,19 @@ class ValidateTests(LedgerTestCase):
             facegenSkipped=True, tool=True, mods=["sub1"], aka="alias")]})
         self.assertEqual(v, [])
 
+    def test_masters_esl_requires_role_types(self):
+        v = ledger.validate_data({"mods": [self.ok_entry(masters="not-a-list")]})
+        self.assertTrue(any("masters" in x for x in v))
+        v = ledger.validate_data({"mods": [self.ok_entry(esl="yes")]})
+        self.assertTrue(any("esl" in x for x in v))
+        v = ledger.validate_data({"mods": [self.ok_entry(requires=5)]})
+        self.assertTrue(any("requires" in x for x in v))
+        v = ledger.validate_data({"mods": [self.ok_entry(role=5)]})
+        self.assertTrue(any("role" in x for x in v))
+        v = ledger.validate_data({"mods": [self.ok_entry(
+            masters=["Skyrim.esm"], esl=True, requires=["SKSE"], role="body mod")]})
+        self.assertEqual(v, [])
+
 
 if __name__ == "__main__":
     unittest.main()

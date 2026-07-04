@@ -66,6 +66,7 @@ def validate_data(data):
             reason = e.get("removedReason")
             if not (isinstance(reason, str) and reason.strip()):
                 v.append(f"{label}: 'removed' requires non-empty 'removedReason'")
+        # nexusId/plugin/str-fields treat None as absent; masters/esl/requires deliberately reject null
         for f in _STR_FIELDS:
             if f in e and e[f] is not None and not isinstance(e[f], str):
                 v.append(f"{label}: '{f}' should be a string")
