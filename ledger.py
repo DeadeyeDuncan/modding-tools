@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import sys
+import uuid
 from pathlib import Path
 
 GAMES = {
@@ -115,9 +116,15 @@ def save_ledger(path, data, allow_violations=()):
         for stale in old[:-BACKUP_KEEP]:
             stale.unlink()
     text = json.dumps(data, indent=4, ensure_ascii=False).replace("\n", "\r\n") + "\r\n"
-    tmp = path.parent / f"{path.name}.tmp-{os.getpid()}"
-    tmp.write_bytes(text.encode("utf-8"))
-    os.replace(tmp, path)
+    # tmp must stay in path.parent: os.replace is only atomic same-volume
+    for stale_tmp in path.parent.glob(f"{path.name}.tmp-*"):
+        stale_tmp.unlink(missing_ok=True)
+    tmp = path.parent / f"{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    try:
+        tmp.write_bytes(text.encode("utf-8"))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def safe_print(s):

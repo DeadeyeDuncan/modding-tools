@@ -148,6 +148,19 @@ class IoTests(LedgerTestCase):
         with self.assertRaises(ledger.LedgerError):
             ledger.load_ledger(self.root / "nope.json")
 
+    def test_failed_replace_leaves_original_and_no_tmp_litter(self):
+        self.write_ledger([self.entry()])
+        data = ledger.load_ledger(self.ledger_path)
+        before = self.ledger_path.read_bytes()
+        from unittest import mock
+        with mock.patch.object(ledger.os, "replace", side_effect=OSError("locked")):
+            with self.assertRaises(OSError):
+                ledger.save_ledger(self.ledger_path, data)
+        self.assertEqual(self.ledger_path.read_bytes(), before)
+        self.assertEqual(list(self.root.glob("ledger.json.tmp-*")), [])
+        baks = list((self.root / "backups").glob("ledger.json.bak-*"))
+        self.assertTrue(len(baks) >= 1)
+
 
 if __name__ == "__main__":
     unittest.main()
