@@ -230,6 +230,33 @@ def cmd_add(args):
     return 0
 
 
+def cmd_update(args):
+    path = _resolve_ledger(args)
+    data = load_ledger(path)
+    e = find_entry(data, args.name)
+    if e is None:
+        close = difflib.get_close_matches(
+            args.name, [x.get("name", "") for x in data["mods"]], n=3)
+        raise LedgerError(f"no entry named {args.name!r}" +
+                          (f"; close: {', '.join(close)}" if close else ""))
+    for field, val in (("version", args.version), ("source", args.source),
+                       ("role", args.role), ("note", args.note),
+                       ("installed", args.installed)):
+        if val is not None:
+            e[field] = val
+    if args.nexus_id is not None:
+        e["nexusId"] = args.nexus_id
+    plugin = _plugin_value(args.plugin)
+    if plugin is not None:
+        e["plugin"] = plugin
+    if args.append_note:
+        stamp = f"[{today()}] {args.append_note}"
+        e["note"] = (e["note"] + "\n" + stamp) if e.get("note") else stamp
+    save_ledger(path, data)
+    safe_print(f"updated: {_entry_line(e)}")
+    return 0
+
+
 def cmd_get(args):
     data = load_ledger(_resolve_ledger(args))
     e = find_entry(data, args.name)
@@ -313,6 +340,18 @@ def build_parser():
     sp.add_argument("--installed", help="override auto date (YYYY-MM-DD)")
     sp.add_argument("--files-from", help="staged file list -> writes manifests\\<name>.txt")
     sp.set_defaults(func=cmd_add)
+
+    sp = sub.add_parser("update", parents=[common])
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--nexus-id", type=int, dest="nexus_id")
+    sp.add_argument("--version")
+    sp.add_argument("--source")
+    sp.add_argument("--plugin", action="append", default=[])
+    sp.add_argument("--role")
+    sp.add_argument("--note", help="replace note")
+    sp.add_argument("--append-note", dest="append_note", help="append dated line to note")
+    sp.add_argument("--installed", help="set/backfill install date (YYYY-MM-DD)")
+    sp.set_defaults(func=cmd_update)
     return p
 
 

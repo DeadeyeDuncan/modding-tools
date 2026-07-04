@@ -272,5 +272,35 @@ class AddTests(LedgerTestCase):
         self.assertIn("exists", out)
 
 
+class UpdateTests(LedgerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.write_ledger([{"name": "Mod A", "installed": "2026-06-20",
+                            "version": "1.0", "note": "first"}])
+
+    def reload_a(self):
+        data = json.loads(self.ledger_path.read_bytes().decode("utf-8-sig"))
+        return data["mods"][0]
+
+    def test_update_fields(self):
+        code, _ = self.run_cli("update", "--name", "Mod A", "--version", "1.1",
+                               "--plugin", "A.esp", "--installed", "2026-06-21")
+        self.assertEqual(code, 0)
+        e = self.reload_a()
+        self.assertEqual((e["version"], e["plugin"], e["installed"]),
+                         ("1.1", "A.esp", "2026-06-21"))
+
+    def test_append_note_dated(self):
+        self.run_cli("update", "--name", "Mod A", "--append-note", "re-tested fine")
+        note = self.reload_a()["note"]
+        self.assertTrue(note.startswith("first\n["))
+        self.assertIn("] re-tested fine", note)
+
+    def test_unknown_name_suggests_close(self):
+        code, out = self.run_cli("update", "--name", "Mod Aa", "--version", "2")
+        self.assertEqual(code, 2)
+        self.assertIn("Mod A", out)
+
+
 if __name__ == "__main__":
     unittest.main()
