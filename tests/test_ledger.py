@@ -301,6 +301,47 @@ class UpdateTests(LedgerTestCase):
         self.assertEqual(code, 2)
         self.assertIn("Mod A", out)
 
+    def test_note_empty_string_clears(self):
+        code, _ = self.run_cli("update", "--name", "Mod A", "--note", "")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.reload_a()["note"], "")
+
+    def test_note_replace_then_append_combined(self):
+        code, _ = self.run_cli("update", "--name", "Mod A",
+                               "--note", "replaced", "--append-note", "checked")
+        self.assertEqual(code, 0)
+        note = self.reload_a()["note"]
+        self.assertTrue(note.startswith("replaced\n["))
+        self.assertIn("] checked", note)
+
+
+class RemoveTests(LedgerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.write_ledger([{"name": "Mod A", "installed": "2026-06-20"}])
+
+    def test_remove_sets_fields_keeps_entry(self):
+        code, _ = self.run_cli("remove", "--name", "Mod A",
+                               "--reason", "caused CTD",
+                               "--to", "backups\\moda-20260704")
+        self.assertEqual(code, 0)
+        data = json.loads(self.ledger_path.read_bytes().decode("utf-8-sig"))
+        e = data["mods"][0]
+        self.assertEqual(len(data["mods"]), 1)
+        self.assertRegex(e["removed"], r"^\d{4}-\d{2}-\d{2}$")
+        self.assertEqual(e["removedReason"], "caused CTD")
+        self.assertEqual(e["removedTo"], "backups\\moda-20260704")
+
+    def test_remove_requires_reason(self):
+        code, _ = self.run_cli("remove", "--name", "Mod A", "--reason", "  ")
+        self.assertEqual(code, 2)
+
+    def test_remove_twice_errors(self):
+        self.run_cli("remove", "--name", "Mod A", "--reason", "x")
+        code, out = self.run_cli("remove", "--name", "Mod A", "--reason", "y")
+        self.assertEqual(code, 2)
+        self.assertIn("already removed", out)
+
 
 if __name__ == "__main__":
     unittest.main()

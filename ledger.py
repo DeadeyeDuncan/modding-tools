@@ -257,6 +257,25 @@ def cmd_update(args):
     return 0
 
 
+def cmd_remove(args):
+    path = _resolve_ledger(args)
+    data = load_ledger(path)
+    e = find_entry(data, args.name)
+    if e is None:
+        raise LedgerError(f"no entry named {args.name!r}")
+    if "removed" in e:
+        raise LedgerError(f"{e['name']!r} already removed on {e['removed']}")
+    if not args.reason.strip():
+        raise LedgerError("--reason must be non-empty")
+    e["removed"] = today()
+    e["removedReason"] = args.reason
+    if args.to:
+        e["removedTo"] = args.to
+    save_ledger(path, data)
+    safe_print(f"removed: {_entry_line(e)}")
+    return 0
+
+
 def cmd_get(args):
     data = load_ledger(_resolve_ledger(args))
     e = find_entry(data, args.name)
@@ -352,6 +371,12 @@ def build_parser():
     sp.add_argument("--append-note", dest="append_note", help="append dated line to note")
     sp.add_argument("--installed", help="set/backfill install date (YYYY-MM-DD)")
     sp.set_defaults(func=cmd_update)
+
+    sp = sub.add_parser("remove", parents=[common])
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--reason", required=True)
+    sp.add_argument("--to", help="backup path the files were moved to")
+    sp.set_defaults(func=cmd_remove)
     return p
 
 
