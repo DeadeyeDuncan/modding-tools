@@ -1352,17 +1352,18 @@ Add to `ledger.py`:
 
 ```python
 def parse_plugins_txt(path):
-    """Return set of enabled plugin filenames (lowercase). '*' prefix = enabled."""
+    """Return dict of enabled plugins: lowercase name -> original-case name ('*' prefix = enabled)."""
     p = Path(path)
     if not p.is_file():
         raise LedgerError(f"Plugins.txt not found: {p}")
-    out = set()
+    out = {}
     for line in p.read_bytes().decode("utf-8-sig").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         if line.startswith("*"):
-            out.add(line[1:].strip().lower())
+            name = line[1:].strip()
+            out[name.lower()] = name
     return out
 
 
@@ -1399,11 +1400,11 @@ def cmd_check(args):
                 if key not in enabled:
                     findings.append(("ERROR", f"{e.get('name')}: plugin {pl} "
                                      f"not enabled in Plugins.txt"))
-        for pl in sorted(enabled):
-            if pl in VANILLA_PLUGINS or pl.startswith("cc"):
+        for key in sorted(enabled):
+            if key in VANILLA_PLUGINS or key.startswith("cc"):
                 continue
-            if pl not in claims:
-                findings.append(("WARN", f"Plugins.txt: {pl} not owned by any "
+            if key not in claims:
+                findings.append(("WARN", f"Plugins.txt: {enabled[key]} not owned by any "
                                  f"active ledger entry"))
 
     root = data.get("dataDir") or data.get("installDir")

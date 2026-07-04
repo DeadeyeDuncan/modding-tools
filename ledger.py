@@ -357,6 +357,95 @@ def cmd_migrate(args):
     return 1 if manual else 0
 
 
+def parse_plugins_txt(path):
+    """Return dict of enabled plugins: lowercase name -> original-case name ('*' prefix = enabled)."""
+    p = Path(path)
+    if not p.is_file():
+        raise LedgerError(f"Plugins.txt not found: {p}")
+    out = {}
+    for line in p.read_bytes().decode("utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("*"):
+            name = line[1:].strip()
+            out[name.lower()] = name
+    return out
+
+
+def _entry_plugins(e):
+    plugin = e.get("plugin")
+    if isinstance(plugin, str):
+        return [plugin]
+    if isinstance(plugin, list):
+        return [x for x in plugin if isinstance(x, str)]
+    return []
+
+
+def cmd_check(args):
+    path = _resolve_ledger(args)
+    data = load_ledger(path)
+    findings = []  # (severity, message)
+    for v in validate_data(data):
+        findings.append(("ERROR", v))
+    active = [e for e in data["mods"] if isinstance(e, dict) and "removed" not in e]
+    removed = [e for e in data["mods"] if isinstance(e, dict) and "removed" in e]
+
+    plugins_txt = data.get("pluginsTxt")
+    if plugins_txt:
+        enabled = parse_plugins_txt(plugins_txt)
+        claims = {}
+        for e in active:
+            for pl in _entry_plugins(e):
+                key = pl.lower()
+                if key in claims:
+                    findings.append(("ERROR", f"{pl} claimed by both "
+                                     f"{claims[key]!r} and {e.get('name')!r}"))
+                else:
+                    claims[key] = e.get("name")
+                if key not in enabled:
+                    findings.append(("ERROR", f"{e.get('name')}: plugin {pl} "
+                                     f"not enabled in Plugins.txt"))
+        for key in sorted(enabled):
+            if key in VANILLA_PLUGINS or key.startswith("cc"):
+                continue
+            if key not in claims:
+                findings.append(("WARN", f"Plugins.txt: {enabled[key]} not owned by any "
+                                 f"active ledger entry"))
+
+    root = data.get("dataDir") or data.get("installDir")
+    ledger_dir = Path(path).parent
+    for e in active + removed:
+        pointer = e.get("manifest")
+        if not pointer:
+            continue
+        mpath = ledger_dir / pointer
+        if not mpath.is_file():
+            findings.append(("ERROR", f"{e.get('name')}: manifest missing: {pointer}"))
+            continue
+        if not root:
+            continue
+        paths = [x for x in mpath.read_bytes().decode("utf-8-sig").splitlines() if x.strip()]
+        hits = [p for p in paths if (Path(root) / p.replace("\\", "/")).exists()]
+        if "removed" not in e:
+            missing = [p for p in paths if p not in set(hits)]
+            if missing:
+                shown = "; ".join(missing[:5])
+                findings.append(("WARN", f"{e.get('name')}: {len(missing)}/{len(paths)} "
+                                 f"manifest file(s) missing on disk: {shown}"))
+        elif hits:
+            findings.append(("INFO", f"{e.get('name')} (removed): {len(hits)}/{len(paths)} "
+                             f"file(s) still on disk (later mod may own them)"))
+
+    counts = {"ERROR": 0, "WARN": 0, "INFO": 0}
+    for sev, msg in findings:
+        counts[sev] += 1
+        safe_print(f"{sev}: {msg}")
+    safe_print(f"{counts['ERROR']} error(s), {counts['WARN']} warning(s), "
+               f"{counts['INFO']} info")
+    return 1 if counts["ERROR"] or counts["WARN"] else 0
+
+
 def cmd_get(args):
     data = load_ledger(_resolve_ledger(args))
     e = find_entry(data, args.name)
@@ -462,6 +551,9 @@ def build_parser():
     sp = sub.add_parser("migrate", parents=[common])
     sp.add_argument("--apply", action="store_true", help="execute (default: dry-run)")
     sp.set_defaults(func=cmd_migrate)
+
+    sp = sub.add_parser("check", parents=[common])
+    sp.set_defaults(func=cmd_check)
     return p
 
 

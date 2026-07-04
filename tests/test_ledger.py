@@ -441,5 +441,97 @@ class MigrateTests(LedgerTestCase):
         self.assertEqual(mods[0]["fileCount"], 4754)
 
 
+class CheckTests(LedgerTestCase):
+    def make_manifest(self, name, paths, create_files=True):
+        body = "\r\n".join(paths) + "\r\n"
+        (self.manifests / name).write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+        if create_files:
+            for p in paths:
+                f = self.data_dir / p.replace("\\", "/")
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text("x")
+
+    def test_clean_setup_passes(self):
+        self.make_manifest("Mod-A.txt", ["meshes\\a.nif"])
+        self.plugins_txt.write_text("*A.esp\n", encoding="utf-8")
+        self.write_ledger([{"name": "Mod A", "installed": "2026-06-20",
+                            "plugin": "A.esp", "manifest": "manifests\\Mod-A.txt"}])
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 0)
+        self.assertIn("0 error(s)", out)
+
+    def test_plugin_missing_from_plugins_txt_is_error(self):
+        self.plugins_txt.write_text("", encoding="utf-8")
+        self.write_ledger([{"name": "Mod A", "installed": "2026-06-20", "plugin": "A.esp"}])
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 1)
+        self.assertIn("ERROR", out)
+        self.assertIn("A.esp", out)
+
+    def test_unowned_plugin_is_warn_vanilla_ignored(self):
+        self.plugins_txt.write_text("*Skyrim.esm\n*Mystery.esp\n*ccBGSSSE001-Fish.esm\n",
+                                    encoding="utf-8")
+        self.write_ledger([{"name": "Mod A", "installed": "2026-06-20"}])
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 1)
+        self.assertIn("WARN", out)
+        self.assertIn("Mystery.esp", out)
+        self.assertNotIn("Skyrim.esm", out)
+        self.assertNotIn("ccBGSSSE001", out)
+
+    def test_removed_plugin_not_required(self):
+        self.plugins_txt.write_text("", encoding="utf-8")
+        self.write_ledger([{"name": "Mod A", "installed": "2026-06-20", "plugin": "A.esp",
+                            "removed": "2026-07-01", "removedReason": "gone"}])
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 0)
+
+    def test_missing_manifest_pointer_is_error(self):
+        self.plugins_txt.write_text("", encoding="utf-8")
+        self.write_ledger([{"name": "Mod A", "installed": "2026-06-20",
+                            "manifest": "manifests\\Nope.txt"}])
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 1)
+        self.assertIn("ERROR", out)
+        self.assertIn("Nope.txt", out)
+
+    def test_active_missing_files_warn_removed_present_info(self):
+        self.make_manifest("Mod-A.txt", ["meshes\\gone.nif"], create_files=False)
+        self.make_manifest("Mod-B.txt", ["meshes\\still.nif"], create_files=True)
+        self.plugins_txt.write_text("", encoding="utf-8")
+        self.write_ledger([
+            {"name": "Mod A", "installed": "2026-06-20", "manifest": "manifests\\Mod-A.txt"},
+            {"name": "Mod B", "installed": "2026-06-20", "manifest": "manifests\\Mod-B.txt",
+             "removed": "2026-07-01", "removedReason": "swapped out"},
+        ])
+        code, out = self.run_cli("check")
+        self.assertIn("WARN", out)
+        self.assertIn("gone.nif", out)
+        self.assertIn("INFO", out)
+        self.assertIn("Mod B", out)
+        self.assertEqual(code, 1)  # WARN fails; INFO alone would not
+
+    def test_duplicate_plugin_claim_is_error(self):
+        self.plugins_txt.write_text("*A.esp\n", encoding="utf-8")
+        self.write_ledger([
+            {"name": "Mod A", "installed": "2026-06-20", "plugin": "A.esp"},
+            {"name": "Mod B", "installed": "2026-06-21", "plugin": ["A.esp", "B.esp"]},
+        ])
+        code, out = self.run_cli("check")
+        self.assertIn("ERROR", out)
+        self.assertIn("claimed by", out)
+
+    def test_cp77_style_no_plugins_txt(self):
+        # header without pluginsTxt: plugin checks skipped, manifest checks run
+        self.make_manifest("Mod-A.txt", ["archive\\pc\\mod\\a.archive"])
+        data = {"game": "Cyberpunk 2077", "installDir": str(self.data_dir),
+                "mods": [{"name": "Mod A", "installed": "2026-07-02",
+                          "manifest": "manifests\\Mod-A.txt"}]}
+        text = json.dumps(data, indent=4).replace("\n", "\r\n")
+        self.ledger_path.write_bytes(text.encode("utf-8"))
+        code, out = self.run_cli("check")
+        self.assertEqual(code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
