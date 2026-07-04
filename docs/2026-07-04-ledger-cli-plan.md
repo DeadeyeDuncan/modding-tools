@@ -465,6 +465,21 @@ class CliReadTests(LedgerTestCase):
         # --game must map to the baked-in path; unknown game exits 2
         code = ledger.main(["get", "--game", "nogame", "--name", "x"])
         self.assertEqual(code, 2)
+
+    def test_flag_after_subcommand_and_repeated_last_wins(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = ledger.main(["list", "--ledger", str(self.ledger_path), "--count"])
+        self.assertEqual(code, 0)
+        self.assertIn("2 total", buf.getvalue())
+        other = self.root / "other.json"
+        other.write_bytes(json.dumps({"game": "x", "mods": []}).encode("utf-8"))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = ledger.main(["--ledger", str(other), "list",
+                                "--ledger", str(self.ledger_path), "--count"])
+        self.assertEqual(code, 0)
+        self.assertIn("2 total", buf.getvalue())
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -554,9 +569,18 @@ def cmd_validate(args):
 
 def build_parser():
     p = argparse.ArgumentParser(prog="ledger.py", description=__doc__)
+
+    def add_globals(parser):
+        # SUPPRESS: unprovided flags set no attribute, so subparser parsing
+        # never clobbers a value parsed before the subcommand (bpo-9351)
+        parser.add_argument("--game", default=argparse.SUPPRESS,
+                            help="skyrim | cp77 (validated in _resolve_ledger for exit-2 contract)")
+        parser.add_argument("--ledger", default=argparse.SUPPRESS,
+                            help="explicit ledger.json path (overrides --game)")
+
+    add_globals(p)
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--game", choices=None, help="skyrim | cp77")
-    common.add_argument("--ledger", help="explicit ledger.json path (overrides --game)")
+    add_globals(common)
     sub = p.add_subparsers(dest="command", required=True)
 
     sp = sub.add_parser("get", parents=[common])
@@ -576,18 +600,8 @@ def build_parser():
 
 
 def main(argv=None):
-    argv = list(sys.argv[1:] if argv is None else argv)
-    # global flags may appear before the subcommand; hoist them behind it
-    lead, rest = [], list(argv)
-    while rest and (rest[0] in ("--game", "--ledger")
-                    or rest[0].startswith(("--game=", "--ledger="))):
-        if "=" in rest[0] or len(rest) < 2:
-            lead.append(rest.pop(0))
-        else:
-            lead += rest[:2]
-            rest = rest[2:]
     parser = build_parser()
-    args = parser.parse_args(rest + lead)
+    args = parser.parse_args(argv)
     try:
         return args.func(args)
     except LedgerError as ex:
@@ -595,7 +609,7 @@ def main(argv=None):
         return 2
 ```
 
-(`--game` uses free text + `_resolve_ledger` raising `LedgerError`, so unknown games exit 2 instead of argparse's own error path — matches the test. main() hoists leading --game/--ledger flags behind the subcommand so both `ledger.py --ledger X get` and `ledger.py get --ledger X` parse; flags are registered on subparsers only.)
+(--game/--ledger are registered on both the top-level parser and each subparser with default=argparse.SUPPRESS, so flags work before or after the subcommand and repeated flags are last-wins; SUPPRESS prevents subparser defaults clobbering top-level values. --game validity is checked in _resolve_ledger, not argparse choices, to keep the exit-2 contract.)
 
 - [ ] **Step 4: Run tests, expect pass**
 

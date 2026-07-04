@@ -211,9 +211,18 @@ def cmd_validate(args):
 
 def build_parser():
     p = argparse.ArgumentParser(prog="ledger.py", description=__doc__)
+
+    def add_globals(parser):
+        # SUPPRESS: unprovided flags set no attribute, so subparser parsing
+        # never clobbers a value parsed before the subcommand (bpo-9351)
+        parser.add_argument("--game", default=argparse.SUPPRESS,
+                            help="skyrim | cp77 (validated in _resolve_ledger for exit-2 contract)")
+        parser.add_argument("--ledger", default=argparse.SUPPRESS,
+                            help="explicit ledger.json path (overrides --game)")
+
+    add_globals(p)
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--game", choices=None, help="skyrim | cp77")
-    common.add_argument("--ledger", help="explicit ledger.json path (overrides --game)")
+    add_globals(common)
     sub = p.add_subparsers(dest="command", required=True)
 
     sp = sub.add_parser("get", parents=[common])
@@ -233,18 +242,8 @@ def build_parser():
 
 
 def main(argv=None):
-    argv = list(sys.argv[1:] if argv is None else argv)
-    # global flags may appear before the subcommand; hoist them behind it
-    lead, rest = [], list(argv)
-    while rest and (rest[0] in ("--game", "--ledger")
-                    or rest[0].startswith(("--game=", "--ledger="))):
-        if "=" in rest[0] or len(rest) < 2:
-            lead.append(rest.pop(0))
-        else:
-            lead += rest[:2]
-            rest = rest[2:]
     parser = build_parser()
-    args = parser.parse_args(rest + lead)
+    args = parser.parse_args(argv)
     try:
         return args.func(args)
     except LedgerError as ex:

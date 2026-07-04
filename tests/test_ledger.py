@@ -207,6 +207,21 @@ class CliReadTests(LedgerTestCase):
         code = ledger.main(["get", "--game", "nogame", "--name", "x"])
         self.assertEqual(code, 2)
 
+    def test_flag_after_subcommand_and_repeated_last_wins(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = ledger.main(["list", "--ledger", str(self.ledger_path), "--count"])
+        self.assertEqual(code, 0)
+        self.assertIn("2 total", buf.getvalue())
+        other = self.root / "other.json"
+        other.write_bytes(json.dumps({"game": "x", "mods": []}).encode("utf-8"))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = ledger.main(["--ledger", str(other), "list",
+                                "--ledger", str(self.ledger_path), "--count"])
+        self.assertEqual(code, 0)
+        self.assertIn("2 total", buf.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
