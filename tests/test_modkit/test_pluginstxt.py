@@ -120,3 +120,60 @@ def test_diff_detects_external_scramble_reorder_and_disable(game_env, preset):
     report = pluginstxt.diff(snap, str(game_env / "Plugins.txt"))
     assert "ORDER" in report
     assert "STATE" in report and "enabled -> disabled" in report
+
+
+# --- task-9 regression tests: LF-normalize, backup ordering, read() filtering ---
+
+def test_enable_bare_lf_source_normalizes_to_crlf(game_env, preset):
+    """Round-trip a Plugins.txt whose bytes use ONLY bare LF line endings
+    (no CR anywhere, no BOM). _write_raw always joins with '\\r\\n', so the
+    output must be fully CRLF: no bare LF survives and no line gets doubled
+    to '\\r\\r\\n'. This is the one input shape (LF-only, no CRLF at all)
+    the rest of the suite doesn't exercise."""
+    p = game_env / "Plugins.txt"
+    p.write_bytes(
+        b"*Unofficial Skyrim Special Edition Patch.esp\n"
+        b"*SkyUI_SE.esp\n"
+        b"DisabledMod.esp\n"
+        b"*DynDOLOD.esm\n"
+        b"*DynDOLOD.esp\n"
+        b"*Occlusion.esp\n")
+    pluginstxt.enable(preset, "LfMod.esp", None)
+    b = raw(game_env)
+    assert b"\r\n" in b
+    assert b.count(b"\n") == b.count(b"\r\n")  # every \n is part of a \r\n pair
+    assert b"\r\r\n" not in b  # no doubled CR
+
+
+def test_enable_backup_captures_bytes_before_mutation(game_env, preset):
+    """snapshot() must copy Plugins.txt BEFORE any in-memory lines are
+    written back out. Capture the exact pre-call bytes, then assert the
+    backup file enable() creates matches them byte-for-byte (not just that
+    a backup exists) -- this pins the backup-before-mutation ordering."""
+    p = game_env / "Plugins.txt"
+    before = p.read_bytes()
+    pluginstxt.enable(preset, "BackupOrderCheck.esp", None)
+    backups = list((game_env / "backups").glob("plugins-pre-enable-*.txt"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == before
+
+
+def test_read_skips_comments_and_blank_lines(game_env, preset):
+    """read()'s filter (`l.strip() and not l.lstrip().startswith('#')`) must
+    actually drop comment lines and blank/whitespace-only lines, not just
+    pass every line through."""
+    p = game_env / "Plugins.txt"
+    p.write_bytes(
+        b"\xef\xbb\xbf"
+        b"# comment header\r\n"
+        b"*Unofficial Skyrim Special Edition Patch.esp\r\n"
+        b"\r\n"
+        b"*SkyUI_SE.esp\r\n"
+        b"   \r\n"
+        b"DisabledMod.esp\r\n")
+    got = pluginstxt.read(preset)
+    assert got == [
+        "*Unofficial Skyrim Special Edition Patch.esp",
+        "*SkyUI_SE.esp",
+        "DisabledMod.esp",
+    ]
