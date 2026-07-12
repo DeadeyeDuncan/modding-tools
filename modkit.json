@@ -30,5 +30,42 @@
             "manifests_dir": null,
             "vortex_downloads": null
         }
+    },
+    "lodregen": {
+        "skyrim": {
+            "holding_root": "C:\\Modding\\skyrim-manual\\backups\\lodregen",
+            "ledger_dir": "C:\\Modding\\skyrim-manual",
+            "trio": ["DynDOLOD.esm", "DynDOLOD.esp", "Occlusion.esp"],
+            "tool_processes": ["PGPatcher.exe", "TexGenx64.exe", "DynDOLODx64.exe"],
+            "tools": {
+                "pgpatcher_exe": "C:\\Modding\\PGPatcher\\PGPatcher.exe",
+                "texgen_exe": "C:\\Modding\\DynDOLOD\\DynDOLOD\\TexGenx64.exe",
+                "dyndolod_exe": "C:\\Modding\\DynDOLOD\\DynDOLOD\\DynDOLODx64.exe",
+                "dyndolod_ini": "C:\\Modding\\DynDOLOD\\DynDOLOD\\Edit Scripts\\DynDOLOD\\DynDOLOD_SSE.ini"
+            },
+            "outputs": {
+                "pgpatcher": "C:\\Modding\\PGPatcher\\PGPatcher-Output",
+                "texgen": "C:\\Modding\\DynDOLOD\\TexGen_Output",
+                "dyndolod": "C:\\Modding\\DynDOLOD\\DynDOLOD_Output"
+            },
+            "min_output_files": {"texgen": 1000, "dyndolod": 3000},
+            "ledger_prefixes": {"texgen": "TexGen Output", "dyndolod": "DynDOLOD Output"},
+            "ng_markers": [
+                "SKSE\\Plugins\\DynDOLOD.DLL",
+                "textures\\DynDOLOD\\lod\\version.ini"
+            ],
+            "protected_inputs": [
+                "textures\\dyndolod\\lod\\dyndolodtreelod*",
+                "textures\\dyndolod\\lod\\dyndolodbackgroundtreelod*",
+                "textures\\dyndolod\\lod\\version.ini",
+                "textures\\dyndolod\\lod\\defaultdiffuse*",
+                "textures\\dyndolod\\lod\\texgen_sse.ini",
+                "meshes\\dyndolod\\lod\\*holycow*",
+                "meshes\\dyndolod\\lod\\*mxtundra*_dyndolod_lod.nif",
+                "*statics_e.dds",
+                "*landscape\\statics\\rocks01*"
+            ],
+            "resources_staging": "C:\\Modding\\tmp\\dyndolod-resources"
+        }
     }
 }
