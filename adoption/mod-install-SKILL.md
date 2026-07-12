@@ -99,10 +99,17 @@ properly instead of forcing.
 
 ## Kenshi
 
-Preset not built yet: `intake`/`stage`/`status` work with `--game kenshi`;
-vets/deploy/remove do not (no `data_dir` configured -> they hard-error). Stage,
-then hand the deploy decision to the user and follow the existing Kenshi manual
-workflow.
+Preset not built yet: `intake`/`stage`/`status` are the usable modkit commands
+for `--game kenshi`. `deploy`/`remove`/`verify` hard-error at exit 1 (no
+`data_dir` configured for Kenshi) - these three are genuinely gated on it.
+`fomod`/`dllvet`/`esp` are Skyrim-only and meaningless here (they fail/warn for
+unrelated reasons - missing ModuleConfig.xml, unparseable PE, bad plugin
+header - not `data_dir`). **`conflicts --game kenshi` does NOT error** - it
+exits 0 and prints "no file overlaps vs Data" without actually checking
+anything (`conflicts.py` short-circuits when `data_dir` is None). Never trust
+that as a clean sweep. Stage, then hand the deploy decision to the user and
+follow the existing manual Kenshi conflict-sweep workflow instead of
+`conflicts`.
 
 ## Remove flow
 
