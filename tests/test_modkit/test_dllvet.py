@@ -62,3 +62,32 @@ def test_dllvet_address_independent_is_ok(game_env, make_staging, run_cli):
     code, out = run_cli("dllvet", "--game", "skyrim", "--staging", str(sd))
     assert code == 0
     assert "Address Library" in out
+
+
+def test_dllvet_truncated_dll_is_unparseable_not_a_crash(game_env, make_staging, run_cli):
+    """A payload with one healthy DLL and one DLL truncated mid-COFF-header must
+    not crash the whole dllvet batch - the truncated file gets a per-file
+    UNPARSEABLE verdict and the healthy one still gets vetted normally."""
+    good = build_dll({"SKSEPlugin_Version": skse_version_blob(
+        compatible=[peparse.encode_runtime("1.6.1170")])})
+    victim = build_dll({"SKSEPlugin_Version": skse_version_blob(
+        compatible=[peparse.encode_runtime("1.6.1170")])})
+    # PE signature lives at offset 0x80 (dos header's e_lfanew), COFF header
+    # starts right after it at 0x84. Cut 2 bytes into the COFF header so the
+    # signature check passes but struct.unpack_from("<HH", ..., pe_off + 4)
+    # would previously blow up with a raw struct.error.
+    truncated = victim[:0x86]
+    assert len(truncated) < len(victim)
+    sd = make_staging({
+        "SKSE/Plugins/good.dll": good,
+        "SKSE/Plugins/truncated.dll": truncated,
+    }, mod="Truncated Mix")
+    code, out = run_cli("dllvet", "--game", "skyrim", "--staging", str(sd))
+    assert code == 2
+    assert "OK" in out and "good.dll" in out
+    assert "UNPARSEABLE" in out and "truncated.dll" in out
+    from modkit import state as mstate
+    st = mstate.InstallState.load(str(sd))
+    verdicts = {k.split("\\")[-1].split("/")[-1]: v["verdict"]
+                for k, v in st.data["vet_results"]["dllvet"].items()}
+    assert verdicts == {"good.dll": "OK", "truncated.dll": "UNPARSEABLE"}
