@@ -625,6 +625,42 @@ def test_cmd_diff_backstop_catches_unforeseen_capture_exception(tmp_path, monkey
     assert "ERROR: snapshot capture failed: boom" in out
 
 
+def test_cmd_diff_against_malformed_snapshot_fails_cleanly(tmp_path, monkeypatch, capsys):
+    # Final-review Minor fix: `diff_report(base, live)` does bracket access
+    # on `base` (b["sha256"], b["enabled"], ledger b["total"], ...) and was
+    # unguarded in cmd_diff. A --against file that's valid JSON but not a
+    # well-formed snapshot dict must degrade to a clean ERROR + nonzero exit,
+    # not a raw KeyError/AttributeError traceback - same "no raw traceback"
+    # invariant as the load_snapshot/capture() backstops above. The default
+    # `snapshot diff` (no --against) path always loads a well-formed
+    # take()-produced snapshot and is unaffected (see
+    # test_cmd_take_then_diff_clean_then_drift).
+    _patch_core(monkeypatch)
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+
+    # Case 1: valid JSON, but not even an object (a bare array).
+    array_file = tmp_path / "not-a-snapshot.json"
+    array_file.write_text("[]\n", encoding="utf-8")
+    rc = snapshot.cmd_diff(_cli(
+        ["snapshot", "diff", "--game", "skyrim", "--against", str(array_file)]))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Traceback" not in out
+    assert "ERROR: not a valid snapshot file" in out and str(array_file) in out
+
+    # Case 2: a JSON object, but missing the "sections" key capture() always emits.
+    no_sections_file = tmp_path / "missing-sections.json"
+    no_sections_file.write_text(
+        json.dumps({"schemaVersion": 1, "game": "skyrim"}), encoding="utf-8")
+    rc = snapshot.cmd_diff(_cli(
+        ["snapshot", "diff", "--game", "skyrim", "--against", str(no_sections_file)]))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Traceback" not in out
+    assert "ERROR: not a valid snapshot file" in out and str(no_sections_file) in out
+
+
 # ---------------------------------------------------------------- Task 7
 
 HAND_EDITED = """# Open Items - skyrim

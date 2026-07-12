@@ -613,6 +613,14 @@ def cmd_diff(args):
     except (OSError, ValueError) as ex:
         safe_print(f"ERROR: cannot read snapshot {base_path}: {ex}")
         return 1
+    # base must be a well-formed snapshot dict (capture() always emits
+    # "sections", even when every section is None) - a JSON file that
+    # parses but isn't shaped like a snapshot (e.g. a bare array/string,
+    # or a hand-edited dict missing "sections") must degrade to a clean
+    # error instead of a raw KeyError/AttributeError out of diff_report.
+    if not isinstance(base, dict) or "sections" not in base:
+        safe_print(f"ERROR: not a valid snapshot file: {base_path}")
+        return 1
     try:
         live = capture(args.game, preset, snap_cfg)
     except Exception as e:  # noqa: BLE001 - belt-and-suspenders backstop: an
