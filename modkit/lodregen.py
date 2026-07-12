@@ -200,3 +200,64 @@ def register(sub):
     st = lsub.add_parser("status", help="list pending/complete regen runs")
     st.add_argument("--game", required=True)
     st.set_defaults(func=cmd_status)
+
+
+# ------------------------------------------------------------ clean guard
+
+def normalize_rel(p):
+    """Data-relative path -> canonical compare form: backslashes, lowercase,
+    no leading separators."""
+    return p.strip().lstrip("\\/").replace("/", "\\").lower()
+
+
+def is_protected(rel, patterns):
+    """True if a Data-relative path matches any protected-inputs pattern.
+    fnmatch '*' spans path separators, so 'meshes\\dyndolod\\lod\\*mxtundra*'
+    reaches files in subfolders (the wiki's non-recursive-scan trap)."""
+    r = normalize_rel(rel)
+    return any(fnmatch.fnmatchcase(r, normalize_rel(pat)) for pat in patterns)
+
+
+def read_lines_bomsafe(path):
+    """Manifest lines, BOM/CRLF tolerant, blanks dropped."""
+    raw = Path(path).read_bytes().decode("utf-8-sig")
+    return [x.strip() for x in raw.replace("\r\n", "\n").split("\n") if x.strip()]
+
+
+def guarded_clean(data_dir, manifest_lines, patterns, quarantine_dir):
+    """Quarantine (never delete) the files a manifest lists out of Data.
+
+    Guards, in order:
+      * a manifest line containing a wildcard aborts the whole clean
+      * a manifest line naming a directory aborts the whole clean
+      * a line matching protected_inputs is SKIPPED and reported
+        (polluted manifests are the recorded failure mode -- the manifest
+        asked for an input's head, we refuse)
+    Returns {"moved": [...], "protected": [...], "missing": [...]}.
+    """
+    report = {"moved": [], "protected": [], "missing": []}
+    data_dir = Path(data_dir)
+    for raw in manifest_lines:
+        rel = raw.strip()
+        if not rel:
+            continue
+        if any(ch in rel for ch in "*?"):
+            raise LodregenError(
+                f"manifest line contains a wildcard -- refusing the whole "
+                f"clean (no blanket deletes): {rel}")
+        src = data_dir / rel
+        if src.is_dir():
+            raise LodregenError(
+                f"manifest line names a directory -- refusing the whole "
+                f"clean (no blanket deletes): {rel}")
+        if is_protected(rel, patterns):
+            report["protected"].append(rel)
+            continue
+        if not src.is_file():
+            report["missing"].append(rel)
+            continue
+        dst = Path(quarantine_dir) / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        report["moved"].append(rel)
+    return report

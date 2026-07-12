@@ -207,3 +207,91 @@ def test_register_wires_three_subcommands():
     assert args.func is lodregen.cmd_pre and args.no_pgpatcher
     args = p.parse_args(["lodregen", "post", "--game", "skyrim", "--stage", "texgen"])
     assert args.func is lodregen.cmd_post and args.stage == "texgen"
+
+
+# ---------------------------------------------------------------- Task 3
+
+PROTECTED = [
+    "textures\\dyndolod\\lod\\dyndolodtreelod*",
+    "textures\\dyndolod\\lod\\dyndolodbackgroundtreelod*",
+    "textures\\dyndolod\\lod\\version.ini",
+    "textures\\dyndolod\\lod\\defaultdiffuse*",
+    "textures\\dyndolod\\lod\\texgen_sse.ini",
+    "meshes\\dyndolod\\lod\\*holycow*",
+    "meshes\\dyndolod\\lod\\*mxtundra*_dyndolod_lod.nif",
+    "*statics_e.dds",
+    "*landscape\\statics\\rocks01*",
+]
+
+
+def test_protected_matches_every_known_input():
+    # the exact victims/inputs from the wiki clean-trap table
+    hits = [
+        "textures\\DynDOLOD\\lod\\DynDOLODTreeLOD.dds",
+        "Textures\\dyndolod\\lod\\dyndolodbackgroundtreelod.dds",
+        "textures/dyndolod/lod/version.ini",          # forward slashes tolerated
+        "textures\\dyndolod\\lod\\defaultdiffuse.dds",
+        "textures\\dyndolod\\lod\\TexGen_SSE.ini",
+        "meshes\\dyndolod\\lod\\holycow_dyndolod_load.nif",
+        # the 7 mxtundra meshes live in SUBFOLDERS -- pattern must span dirs
+        "meshes\\dyndolod\\lod\\effects\\mxtundrastreamtransition01_0100A123_dyndolod_lod.nif",
+        "textures\\cubemaps\\statics_e.dds",
+        "textures\\landscape\\statics\\rocks01.dds",
+        "textures\\landscape\\statics\\rocks01_n.dds",
+    ]
+    for rel in hits:
+        assert lodregen.is_protected(rel, PROTECTED), rel
+
+
+def test_protected_does_not_match_regenerable_output():
+    misses = [
+        "meshes\\terrain\\tamriel\\objects\\tamriel.4.0.-1.bto",
+        "textures\\dyndolod\\lod\\dyndolod_tamriel.dds",   # generated atlas
+        "meshes\\dyndolod\\lod\\somecity_aaa_dyndolod_lod.nif",
+        "DynDOLOD.esm",
+    ]
+    for rel in misses:
+        assert not lodregen.is_protected(rel, PROTECTED), rel
+
+
+def _mk(data, rel):
+    p = data / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"x")
+    return p
+
+
+def test_guarded_clean_moves_skips_reports(tmp_path):
+    data = tmp_path / "Data"
+    quarantine = tmp_path / "q"
+    out_file = _mk(data, "meshes/terrain/tamriel/objects/tamriel.4.0.-1.bto")
+    prot_file = _mk(data, "textures/dyndolod/lod/dyndolodtreelod.dds")
+    manifest = [
+        "meshes\\terrain\\tamriel\\objects\\tamriel.4.0.-1.bto",
+        "textures\\dyndolod\\lod\\dyndolodtreelod.dds",   # polluted manifest!
+        "textures\\dyndolod\\lod\\long_gone.dds",         # already missing
+    ]
+    rep = lodregen.guarded_clean(str(data), manifest, PROTECTED, str(quarantine))
+    assert rep["moved"] == ["meshes\\terrain\\tamriel\\objects\\tamriel.4.0.-1.bto"]
+    assert rep["protected"] == ["textures\\dyndolod\\lod\\dyndolodtreelod.dds"]
+    assert rep["missing"] == ["textures\\dyndolod\\lod\\long_gone.dds"]
+    assert not out_file.exists()
+    assert (quarantine / "meshes/terrain/tamriel/objects/tamriel.4.0.-1.bto").is_file()
+    assert prot_file.is_file()   # the input SURVIVED the polluted manifest
+
+
+def test_guarded_clean_refuses_wildcards_and_dirs(tmp_path):
+    data = tmp_path / "Data"
+    (data / "meshes").mkdir(parents=True)
+    with pytest.raises(lodregen.LodregenError, match="wildcard"):
+        lodregen.guarded_clean(str(data), ["meshes\\*.nif"], PROTECTED,
+                               str(tmp_path / "q"))
+    with pytest.raises(lodregen.LodregenError, match="directory"):
+        lodregen.guarded_clean(str(data), ["meshes"], PROTECTED,
+                               str(tmp_path / "q"))
+
+
+def test_read_lines_bomsafe(tmp_path):
+    f = tmp_path / "m.txt"
+    f.write_bytes(b"\xef\xbb\xbf" + b"a.dds\r\nb.dds\r\n\r\n")
+    assert lodregen.read_lines_bomsafe(f) == ["a.dds", "b.dds"]
