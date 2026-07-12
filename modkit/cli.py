@@ -108,6 +108,54 @@ def register_intake(sub, common):
     sp.set_defaults(func=cmd_intake)
 
 
+def cmd_stage(args):
+    from modkit import archive as arch
+    from modkit import state
+    preset = _preset(args)
+    arc_path = Path(args.archive)
+    if not arc_path.is_file():
+        safe_print(f"ERROR: no such archive: {arc_path}")
+        return 1
+    meta = parse_nexus_filename(arc_path.name)
+    mod_name = args.name or (meta["name"] if meta else arc_path.stem)
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    staging = Path(preset.STAGING_ROOT) / f"{ts}-{state.slug(mod_name)}"
+    payload = staging / "payload"
+    try:
+        entries = arch.listing(preset.SEVENZIP, arc_path)
+        arch.extract_all(preset.SEVENZIP, arc_path, payload)
+    except arch.ArchiveError as ex:
+        safe_print(f"ERROR: {ex}")
+        return 1
+    problems = arch.verify_extraction(entries, payload)
+    if problems:
+        for p in problems[:20]:
+            safe_print(f"  BAD {p}")
+        safe_print(f"ERROR: extraction verify failed ({len(problems)} problems) - "
+                   f"staging kept for inspection: {staging}")
+        return 1
+    st = state.InstallState.create(
+        str(staging), mod=mod_name, game=preset.NAME, archive=str(arc_path),
+        nexus_id=meta["modid"] if meta else None,
+        version=meta["version"] if meta else None,
+        applicable=preset.applicability(str(payload)))
+    st.stamp("intake")
+    st.stamp("staged")
+    safe_print(f"staged: {staging}")
+    pending = st.missing_applicable()
+    safe_print("pending vets: " + (", ".join(pending) if pending else "none"))
+    return 0
+
+
+def register_stage(sub, common):
+    sp = sub.add_parser("stage", parents=[common],
+                        help="FULL-extract archive to a fresh timestamped staging dir, "
+                             "verify count/size vs listing, create install.json")
+    sp.add_argument("archive", help="archive file to stage")
+    sp.add_argument("--name", default=None, help="mod name override (default: Nexus parse)")
+    sp.set_defaults(func=cmd_stage)
+
+
 def _preset(args):
     cfg = config.load(getattr(args, "config", None))
     game = getattr(args, "game", None)
@@ -139,6 +187,7 @@ def build_parser():
 def _register_all(sub, common):
     """Each task appends its register_<cmd>(sub, common) call here."""
     register_intake(sub, common)
+    register_stage(sub, common)
 
 
 def main(argv=None):
