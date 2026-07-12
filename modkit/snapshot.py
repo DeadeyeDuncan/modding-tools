@@ -245,17 +245,27 @@ def capture_plugins(preset):
     and hashing '\\n'.join(lines)+'\\n' makes the hash stable across editors,
     trailing newlines, and CRLF re-saves (normalized-before-hash constraint).
     Returns (None, []) when the preset has no Plugins.txt (CP77).
+
+    A configured-but-missing Plugins.txt (fresh install before first launch,
+    or a moved/drive-letter-changed path) raises pluginstxt.PluginsTxtError -
+    caught here and degraded to an empty capture + warning, same contract as
+    capture_dlls on a missing dllDir.
     """
     if getattr(preset, "PLUGINS_TXT", None) is None:
         return None, []
-    lines = [ln for ln in pluginstxt.read(preset) if ln.strip()]
+    warnings = []
+    try:
+        lines = [ln for ln in pluginstxt.read(preset) if ln.strip()]
+    except pluginstxt.PluginsTxtError as ex:
+        lines = []
+        warnings.append(f"{ex} (captured as empty)")
     joined = "\n".join(lines) + "\n"
     return {
         "lines": lines,
         "sha256": hashlib.sha256(joined.encode("utf-8")).hexdigest(),
         "enabled": sum(1 for ln in lines if ln.startswith("*")),
         "total": len(lines),
-    }, []
+    }, warnings
 
 
 def capture_dlls(snap_cfg):
@@ -276,31 +286,55 @@ def capture_ini(snap_cfg):
     Key list comes from modkit.json - the code reads whatever is configured.
     Basenames (not full paths) keep snapshot keys drive-letter-portable;
     watched files must therefore have distinct basenames.
+
+    An entry missing 'file'/'section'/'key' (typo'd config, e.g. "path"
+    instead of "file") is unvalidated user input - SKIPPED with a warning
+    naming the missing key rather than raising KeyError. Valid entries are
+    captured exactly as before.
     """
     entries = snap_cfg.get("ini")
     if not entries:
         return None, []
     out, warnings = {}, []
     for e in entries:
-        label = f"{Path(e['file']).name}::{e['section']}::{e['key']}"
-        if not Path(e["file"]).is_file():
-            out[label] = None
-            warnings.append(f"ini file not found: {e['file']}")
+        try:
+            file_, section, key = e["file"], e["section"], e["key"]
+        except KeyError as ex:
+            warnings.append(f"snapshot ini entry missing {ex.args[0]!r} key: {e}")
             continue
-        out[label] = read_ini_key(e["file"], e["section"], e["key"])
+        label = f"{Path(file_).name}::{section}::{key}"
+        if not Path(file_).is_file():
+            out[label] = None
+            warnings.append(f"ini file not found: {file_}")
+            continue
+        out[label] = read_ini_key(file_, section, key)
     return out, warnings
 
 
 def capture_enb(snap_cfg):
-    """Watched ENB flags from the configured enbseries.ini."""
+    """Watched ENB flags from the configured enbseries.ini.
+
+    A missing top-level 'file' key or a keys[] entry missing 'section'/'key'
+    is unvalidated user input - degraded with a warning (whole section
+    skipped for a missing 'file'; individual bad key entries skipped
+    otherwise) rather than raising KeyError.
+    """
     enb = snap_cfg.get("enb")
     if not enb:
         return None, []
-    path = enb["file"]
+    try:
+        path = enb["file"]
+    except KeyError:
+        return None, [f"snapshot enb entry missing 'file' key: {enb}"]
     warnings = [] if Path(path).is_file() else [f"ENB config not found: {path}"]
     keys = {}
     for e in enb.get("keys", []):
-        keys[f"{e['section']}::{e['key']}"] = read_ini_key(path, e["section"], e["key"])
+        try:
+            section, key = e["section"], e["key"]
+        except KeyError as ex:
+            warnings.append(f"snapshot enb key entry missing {ex.args[0]!r} key: {e}")
+            continue
+        keys[f"{section}::{key}"] = read_ini_key(path, section, key)
     return {"file": str(path), "keys": keys}, warnings
 
 
@@ -309,8 +343,16 @@ _LEDGER_COUNT_RE = re.compile(r"(\d+) total, (\d+) active, (\d+) removed")
 
 def capture_ledger(game):
     """Entry counts via `ledger.py list --game <g> --count` through the
-    core ledger_bridge (never reads ledger.json directly)."""
-    rc, stdout = ledger_bridge.run(["list", "--game", game, "--count"])
+    core ledger_bridge (never reads ledger.json directly).
+
+    ledger_bridge.run() shells out via subprocess.run(); if the subprocess
+    can't even spawn (OSError, e.g. AV interference) that must degrade to
+    an unknown count + warning, not propagate as a crash.
+    """
+    try:
+        rc, stdout = ledger_bridge.run(["list", "--game", game, "--count"])
+    except OSError as ex:
+        return None, [f"ledger count unavailable (subprocess error): {ex}"]
     m = _LEDGER_COUNT_RE.search(stdout or "")
     if rc != 0 or not m:
         return None, [f"ledger count unavailable (rc={rc}): "
@@ -539,7 +581,14 @@ def _ctx(args):
 
 def cmd_take(args):
     preset, snap_cfg = _ctx(args)
-    path, snap = take(args.game, preset, snap_cfg)
+    try:
+        path, snap = take(args.game, preset, snap_cfg)
+    except Exception as e:  # noqa: BLE001 - belt-and-suspenders backstop: an
+        # unforeseen exception from a future section-capture must surface as
+        # a clean error, never a raw traceback (all known capture_* failure
+        # modes already degrade gracefully above this).
+        safe_print(f"ERROR: snapshot capture failed: {e}")
+        return 1
     safe_print(f"snapshot written: {path}")
     for w in snap["warnings"]:
         safe_print(f"WARNING: {w}")
@@ -564,7 +613,14 @@ def cmd_diff(args):
     except (OSError, ValueError) as ex:
         safe_print(f"ERROR: cannot read snapshot {base_path}: {ex}")
         return 1
-    live = capture(args.game, preset, snap_cfg)
+    try:
+        live = capture(args.game, preset, snap_cfg)
+    except Exception as e:  # noqa: BLE001 - belt-and-suspenders backstop: an
+        # unforeseen exception from a future section-capture must surface as
+        # a clean error, never a raw traceback (all known capture_* failure
+        # modes already degrade gracefully above this).
+        safe_print(f"ERROR: snapshot capture failed: {e}")
+        return 1
     text, deltas, warnings = diff_report(base, live)
     safe_print(f"snapshot diff - {args.game}")
     safe_print(f"baseline: {base_path} (taken {base.get('takenAt', '?')})")

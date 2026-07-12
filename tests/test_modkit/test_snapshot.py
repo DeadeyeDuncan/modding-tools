@@ -494,3 +494,132 @@ def test_cmd_take_then_diff_clean_then_drift(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 2
     assert "B.esp: enabled -> DISABLED" in out and "ASK THE USER" in out
+
+
+# ---------------------------------------------------------------- Task 6 review fixes
+# Graceful-degradation coverage: no capture_* may let an exception escape.
+# Fix 1 (Critical): capture_plugins on a configured-but-missing Plugins.txt.
+# Fix 2 (Important): capture_ini / capture_enb on a malformed config entry.
+# Fix 3 (Minor): capture_ledger on a subprocess OSError.
+# Fix 4 (backstop): cmd_take / cmd_diff catch-all around capture()/take().
+
+def test_capture_plugins_missing_file_degrades_gracefully(tmp_path):
+    # PLUGINS_TXT points at a path that does not exist on disk (fresh
+    # install / moved drive letter) and pluginstxt.read is NOT monkeypatched
+    # here, so this exercises the real pluginstxt.PluginsTxtError path.
+    preset = _stub_preset(tmp_path)
+    sec, warns = snapshot.capture_plugins(preset)
+    assert sec == {
+        "lines": [],
+        "sha256": snapshot.hashlib.sha256(b"\n").hexdigest(),
+        "enabled": 0,
+        "total": 0,
+    }
+    assert len(warns) == 1
+    assert "Plugins.txt not found" in warns[0]
+    assert preset.PLUGINS_TXT in warns[0]
+    assert "captured as empty" in warns[0]
+
+
+def test_cmd_take_missing_plugins_txt_end_to_end_no_raise(tmp_path, monkeypatch, capsys):
+    # Reproduces the reviewer's Critical scenario end-to-end: pluginstxt.read
+    # is left real (not stubbed) against a nonexistent Plugins.txt. Only the
+    # ledger subprocess is stubbed to keep this test off real game dirs.
+    monkeypatch.setattr(snapshot.ledger_bridge, "run", lambda args: LEDGER_OK)
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    rc = snapshot.cmd_take(_cli(["snapshot", "take", "--game", "skyrim"]))
+    out = capsys.readouterr().out
+    assert "Traceback" not in out
+    assert rc == 2  # warning present, but a clean run - not a crash
+    assert "snapshot written:" in out
+    assert "WARNING: Plugins.txt not found" in out and "captured as empty" in out
+    files = list(snapshot.snapshots_dir(preset).glob("snapshot-*.json"))
+    assert len(files) == 1
+    on_disk = snapshot.load_snapshot(files[0])
+    assert on_disk["sections"]["plugins"] == {
+        "lines": [], "sha256": snapshot.hashlib.sha256(b"\n").hexdigest(),
+        "enabled": 0, "total": 0,
+    }
+
+
+def test_capture_ini_malformed_entry_missing_file_key_skipped(tmp_path):
+    ini = tmp_path / "Skyrim.ini"
+    ini.write_text("[Display]\niTexMipMapSkip=1\n")
+    cfg = {"ini": [
+        {"file": str(ini), "section": "Display", "key": "iTexMipMapSkip"},
+        {"path": str(ini), "section": "Display", "key": "iTexMipMapSkip"},  # typo
+    ]}
+    sec, warns = snapshot.capture_ini(cfg)
+    assert sec == {"Skyrim.ini::Display::iTexMipMapSkip": "1"}  # good entry unaffected
+    assert len(warns) == 1
+    assert "missing 'file' key" in warns[0]
+
+
+def test_capture_ini_malformed_entry_missing_section_or_key_skipped(tmp_path):
+    ini = tmp_path / "Skyrim.ini"
+    ini.write_text("[Display]\niTexMipMapSkip=1\n")
+    cfg = {"ini": [{"file": str(ini), "section": "Display"}]}  # no 'key'
+    sec, warns = snapshot.capture_ini(cfg)
+    assert sec == {}
+    assert len(warns) == 1 and "missing 'key' key" in warns[0]
+
+
+def test_capture_enb_malformed_missing_top_level_file_key(tmp_path):
+    cfg = {"enb": {"keys": [{"section": "EFFECT", "key": "X"}]}}  # no 'file'
+    sec, warns = snapshot.capture_enb(cfg)
+    assert sec is None
+    assert len(warns) == 1 and "missing 'file' key" in warns[0]
+
+
+def test_capture_enb_malformed_key_entry_skipped_good_entries_kept(tmp_path):
+    enb = tmp_path / "enbseries.ini"
+    enb.write_text("[EFFECT]\nX=true\n")
+    cfg = {"enb": {"file": str(enb), "keys": [
+        {"section": "EFFECT", "key": "X"},
+        {"section": "EFFECT"},  # no 'key'
+    ]}}
+    sec, warns = snapshot.capture_enb(cfg)
+    assert sec["keys"] == {"EFFECT::X": "true"}
+    assert len(warns) == 1 and "missing 'key' key" in warns[0]
+
+
+def test_capture_ledger_subprocess_oserror_degrades(monkeypatch):
+    def boom(args):
+        raise OSError("subprocess spawn failed (AV interference)")
+    monkeypatch.setattr(snapshot.ledger_bridge, "run", boom)
+    sec, warns = snapshot.capture_ledger("skyrim")
+    assert sec is None
+    assert len(warns) == 1
+    assert "subprocess error" in warns[0]
+    assert "AV interference" in warns[0]
+
+
+def test_cmd_take_backstop_catches_unforeseen_capture_exception(tmp_path, monkeypatch, capsys):
+    # Fix 4: even if some future section-capture regresses and raises, cmd_take
+    # must not dump a traceback - it should print a clean ERROR and exit 1.
+    _patch_core(monkeypatch)
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    monkeypatch.setattr(snapshot, "capture_steam",
+                        lambda snap_cfg: (_ for _ in ()).throw(RuntimeError("boom")))
+    rc = snapshot.cmd_take(_cli(["snapshot", "take", "--game", "skyrim"]))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Traceback" not in out
+    assert "ERROR: snapshot capture failed: boom" in out
+
+
+def test_cmd_diff_backstop_catches_unforeseen_capture_exception(tmp_path, monkeypatch, capsys):
+    _patch_core(monkeypatch)
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    assert snapshot.cmd_take(_cli(["snapshot", "take", "--game", "skyrim"])) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(snapshot, "capture_steam",
+                        lambda snap_cfg: (_ for _ in ()).throw(RuntimeError("boom")))
+    rc = snapshot.cmd_diff(_cli(["snapshot", "diff", "--game", "skyrim"]))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Traceback" not in out
+    assert "ERROR: snapshot capture failed: boom" in out
