@@ -3,12 +3,6 @@
 Exit codes: 0 clean/success, 1 error or verify findings, 2 warned (forceable gate).
 """
 import argparse
-
-PIPELINE = """typical install pipeline (skyrim):
-  intake -> stage -> fomod (if present) -> dllvet -> esp -> conflicts -> deploy -> verify
-judgment gates (dllvet verdicts, FOMOD picks, conflict decisions) are yours between steps.
-run `modkit status --game <game>` at session start and after crashes.
-exit codes: 0 clean, 1 error/findings, 2 warned or refused-pending-vets (--force)."""
 import datetime
 import json
 import re
@@ -16,6 +10,12 @@ import sys
 from pathlib import Path
 
 from modkit import config
+
+PIPELINE = """typical install pipeline (skyrim):
+  intake -> stage -> fomod (if present) -> dllvet -> esp -> conflicts -> deploy -> verify
+judgment gates (dllvet verdicts, FOMOD picks, conflict decisions) are yours between steps.
+run `modkit status --game <game>` at session start and after crashes.
+exit codes: 0 clean, 1 error/findings, 2 warned or refused-pending-vets (--force)."""
 
 
 def safe_print(s):
@@ -468,26 +468,31 @@ def cmd_status(args):
     for d in stagings:
         try:
             st = state.InstallState.load(str(d))
+            pending = st.missing_applicable()
+            undone = [s for s in ("deployed", "recorded", "verified")
+                      if not st.data["stages"].get(s)]
+            vres = st.data["vet_results"].get("verify")
+            mod_name = st.data["mod"]
         except state.StateError as ex:
             safe_print(f"?? {d.name}: {ex}")
             incomplete += 1
             continue
-        pending = st.missing_applicable()
-        undone = [s for s in ("deployed", "recorded", "verified")
-                  if not st.data["stages"].get(s)]
-        vres = st.data["vet_results"].get("verify")
+        except (KeyError, TypeError):
+            safe_print(f"  {d.name}: unreadable install.json (skipped)")
+            incomplete += 1
+            continue
         vtxt = (f"verify {'OK' if vres['ok'] else 'FAILED'} at {vres['ts']}"
                 if vres else "never verified")
         if pending or undone:
             incomplete += 1
-            safe_print(f"INCOMPLETE {d.name} [{st.data['mod']}]")
+            safe_print(f"INCOMPLETE {d.name} [{mod_name}]")
             if pending:
                 safe_print(f"  pending vets: {', '.join(pending)}")
             if undone:
                 safe_print(f"  not done: {', '.join(undone)}")
             safe_print(f"  {vtxt}")
         elif args.all:
-            safe_print(f"complete   {d.name} [{st.data['mod']}] - {vtxt}")
+            safe_print(f"complete   {d.name} [{mod_name}] - {vtxt}")
     safe_print(f"{len(stagings)} staging dir(s), {incomplete} incomplete")
     return 0
 
