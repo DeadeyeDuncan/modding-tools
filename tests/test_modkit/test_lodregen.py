@@ -604,3 +604,87 @@ def test_pre_new_run_collision_surfaces_friendly_message(tmp_path, monkeypatch, 
     assert rc == 1
     assert "try again" in out.lower()
     assert "Traceback" not in out
+
+
+# ---------------------------------------------------------------- Task 5
+
+def test_read_masters_roundtrip(tmp_path):
+    p = tmp_path / "DynDOLOD.esp"
+    p.write_bytes(make_tes4(["Skyrim.esm", "Update.esm", "JKs Skyrim.esp",
+                             "DynDOLOD.esm"]))
+    assert lodregen.read_masters(p) == ["Skyrim.esm", "Update.esm",
+                                        "JKs Skyrim.esp", "DynDOLOD.esm"]
+
+
+def test_read_masters_rejects_non_plugin(tmp_path):
+    p = tmp_path / "not_a_plugin.esp"
+    p.write_bytes(b"MZ\x90\x00 definitely not TES4")
+    with pytest.raises(ValueError, match="TES4"):
+        lodregen.read_masters(p)
+
+
+def test_read_masters_handles_xxxx_oversize(tmp_path):
+    # An XXXX subrecord promotes the NEXT subrecord's size to 32 bits
+    # (DynDOLOD.esm headers carry huge ONAM arrays). MAST after it must
+    # still parse.
+    onam = b"\x00" * 70000
+    subs = (b"HEDR" + struct.pack("<H", 12) + struct.pack("<fII", 1.71, 0, 0)
+            + b"XXXX" + struct.pack("<H", 4) + struct.pack("<I", len(onam))
+            + b"ONAM" + struct.pack("<H", 0) + onam
+            + b"MAST" + struct.pack("<H", 11) + b"Skyrim.esm\x00"
+            + b"DATA" + struct.pack("<H", 8) + b"\x00" * 8)
+    p = tmp_path / "big.esm"
+    p.write_bytes(b"TES4" + struct.pack("<IIII", len(subs), 1, 0, 0)
+                  + struct.pack("<HH", 44, 0) + subs)
+    assert lodregen.read_masters(p) == ["Skyrim.esm"]
+
+
+def test_master_problems_classifies(tmp_path):
+    data = tmp_path / "Data"
+    data.mkdir()
+    # masters on disk
+    (data / "JKs Skyrim.esp").write_bytes(make_tes4(["Skyrim.esm"]))
+    (data / "LateMod.esp").write_bytes(make_tes4(["Skyrim.esm"]))
+    plugin = data / "Occlusion.esp"
+    plugin.write_bytes(make_tes4([
+        "Skyrim.esm",          # implicit -> never reported
+        "ccBGSSSE037-Curios.esl",   # cc* -> never reported
+        "_ResourcePack.esl",   # implicit -> never reported
+        "JKs Skyrim.esp",      # on disk + enabled earlier -> fine
+        "GoneMod.esp",         # not on disk -> MISSING
+        "DisabledMod.esp",     # on disk but not enabled -> NOT ENABLED
+        "LateMod.esp",         # enabled AFTER the plugin -> loads AFTER
+    ]))
+    (data / "DisabledMod.esp").write_bytes(make_tes4(["Skyrim.esm"]))
+    enabled = ["jks skyrim.esp", "occlusion.esp", "latemod.esp"]
+    probs = lodregen.master_problems(plugin, data, enabled)
+    text = "\n".join(probs)
+    assert "GoneMod.esp" in text and "MISSING" in text
+    assert "DisabledMod.esp" in text and "NOT ENABLED" in text
+    assert "LateMod.esp" in text and "AFTER" in text
+    assert "Skyrim.esm" not in text
+    assert "ccBGSSSE037" not in text
+    assert "_ResourcePack" not in text
+    assert len(probs) == 3
+
+
+def test_master_problems_also_present_covers_undeployed_trio(tmp_path):
+    # DynDOLOD.esp masters DynDOLOD.esm; during post's verify the esm is
+    # still in the OUTPUT dir, not Data -- also_present covers it.
+    data = tmp_path / "Data"
+    data.mkdir()
+    out = tmp_path / "DynDOLOD_Output"
+    out.mkdir()
+    esp = out / "DynDOLOD.esp"
+    esp.write_bytes(make_tes4(["Skyrim.esm", "DynDOLOD.esm"]))
+    future = ["dyndolod.esm", "dyndolod.esp", "occlusion.esp"]
+    assert lodregen.master_problems(esp, data, future,
+                                    also_present=["DynDOLOD.esm"]) == []
+    # without also_present it is MISSING
+    probs = lodregen.master_problems(esp, data, future)
+    assert len(probs) == 1 and "MISSING" in probs[0]
+
+
+def test_enabled_plugins_strips_stars_and_comments():
+    lines = ["# comment", "*Foo.esp", "Disabled.esp", "*Bar.esm", ""]
+    assert lodregen.enabled_plugins(lines) == ["foo.esp", "bar.esm"]

@@ -525,6 +525,82 @@ def enabled_plugins(lines):
     return out
 
 
+# ------------------------------------------------------------ TES4 masters
+# modkit.tes4.parse_header() exists on master and is the reviewed-correct
+# general-purpose TES4 header parser -- reused wherever possible. It does
+# NOT special-case an XXXX subrecord (a size-override marker that promotes
+# the *next* subrecord's declared size from 16-bit to a 32-bit payload).
+# Real DynDOLOD.esm headers carry an oversized ONAM array preceded by
+# exactly this XXXX marker (wiki's 5th-regen lesson); parse_header's plain
+# sig+u16size walk would desync at that ONAM and read garbage as subrecord
+# headers for the remainder of the record, silently losing any MAST that
+# follows. read_masters() below is a lodregen-local walk purely so it can
+# add that one piece of oversize-aware logic; everything else (header
+# layout, MAST extraction, cp1252 decode) mirrors modkit.tes4 on purpose.
+# If modkit.tes4 ever grows XXXX support this can delegate to it instead.
+
+IMPLICIT_MASTERS = {"skyrim.esm", "update.esm", "dawnguard.esm",
+                    "hearthfires.esm", "dragonborn.esm"}
+
+
+def read_masters(plugin_path):
+    """MAST-subrecord walk of a plugin's TES4 header -> master filenames.
+
+    Header layout (SSE): sig(4) dataSize(4) flags(4) formID(4) vc(4)
+    version(2) unknown(2) = 24 bytes, then subrecords sig(4)+size(2)+data.
+    An XXXX subrecord promotes the NEXT subrecord's size to its uint32
+    payload (DynDOLOD.esm headers carry huge ONAM arrays)."""
+    data = Path(plugin_path).read_bytes()
+    if len(data) < 24 or data[:4] != b"TES4":
+        raise ValueError(f"not a TES4 plugin: {plugin_path}")
+    data_size = struct.unpack_from("<I", data, 4)[0]
+    end = min(24 + data_size, len(data))
+    masters, off, oversize = [], 24, None
+    while off + 6 <= end:
+        sig = data[off:off + 4]
+        size = struct.unpack_from("<H", data, off + 4)[0]
+        off += 6
+        if oversize is not None:
+            size, oversize = oversize, None
+        if sig == b"XXXX" and size == 4:
+            oversize = struct.unpack_from("<I", data, off)[0]
+        elif sig == b"MAST":
+            masters.append(data[off:off + size].rstrip(b"\x00")
+                           .decode("cp1252"))
+        off += size
+    return masters
+
+
+def master_problems(plugin_path, data_dir, enabled_ordered, also_present=()):
+    """Real load-order problems for one plugin's masters. Excludes the
+    implicit base ESMs, cc*, and _ResourcePack* (the wiki's naive-regex
+    over-report lesson). `also_present` = names counted as on-disk+enabled-
+    in-given-order even if not in Data yet (the about-to-be-deployed trio)."""
+    plugin_path = Path(plugin_path)
+    pname = plugin_path.name.lower()
+    extra = {x.lower() for x in also_present}
+    problems = []
+    try:
+        pos = enabled_ordered.index(pname)
+    except ValueError:
+        pos = len(enabled_ordered)
+    for m in read_masters(plugin_path):
+        ml = m.lower()
+        if (ml in IMPLICIT_MASTERS or ml.startswith("cc")
+                or ml.startswith("_resourcepack")):
+            continue
+        if not ((Path(data_dir) / m).is_file() or ml in extra):
+            problems.append(f"{plugin_path.name}: master {m} MISSING from Data")
+            continue
+        if ml not in enabled_ordered:
+            problems.append(f"{plugin_path.name}: master {m} on disk but "
+                            f"NOT ENABLED in Plugins.txt")
+        elif enabled_ordered.index(ml) > pos:
+            problems.append(f"{plugin_path.name}: master {m} loads AFTER "
+                            f"{plugin_path.name}")
+    return problems
+
+
 # ------------------------------------------------------------ GUI ritual
 
 def gui_sequence(sec, game, no_pgpatcher, data_dir):
