@@ -659,6 +659,7 @@ def register(sub):
 # --------------------------------------------------------------------------
 
 _ITEM_RE = re.compile(r"^\s*[-*]\s*\[(?P<mark>[ xX])\]\s*(?P<body>.*\S)\s*$")
+_HEADING_RE = re.compile(r"^#{1,6}\s")
 
 
 def parse_open_items(text):
@@ -667,8 +668,22 @@ def parse_open_items(text):
     Authority is the checkbox mark, not the heading: any '- [ ]' line
     anywhere counts as open and any '- [x]' as completed, so hand-added
     items in the wrong section still round-trip correctly. Blank lines,
-    headings ('#...'), and '(none)' placeholders are layout and dropped;
-    every other non-blank line is preserved verbatim under notes.
+    real markdown headings, and '(none)' placeholders are layout and
+    dropped; every other non-blank line is preserved verbatim under notes.
+
+    A line only counts as a heading when it matches real markdown heading
+    syntax ('#{1,6}' followed by whitespace, e.g. '## Notes'). A line that
+    merely starts with '#' but has no space after the hashes (e.g.
+    '#1234 blocked on upstream', a stray hashtag-style note) is NOT a
+    heading - it falls through and is preserved as prose, matching the
+    "stray prose is preserved" constraint (previously this was silently
+    deleted, a data-loss bug).
+
+    Note: a line consisting solely of the literal '(none)' is always
+    treated as the empty-section placeholder and is never preserved as
+    prose, even if a user typed exactly that as a note - this keeps
+    parse/render round-trips stable and is considered an acceptable,
+    near-zero-probability edge case.
     """
     doc = {"open": [], "done": [], "notes": []}
     for line in (text or "").split("\n"):
@@ -678,7 +693,7 @@ def parse_open_items(text):
             doc[bucket].append(m.group("body"))
             continue
         s = line.strip()
-        if not s or s.startswith("#") or s == "(none)":
+        if not s or _HEADING_RE.match(s) or s == "(none)":
             continue
         doc["notes"].append(s)
     return doc

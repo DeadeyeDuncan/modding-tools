@@ -678,3 +678,77 @@ def test_roundtrip_stable():
     doc2 = snapshot.parse_open_items(text1)
     assert doc2 == doc                       # nothing lost, nothing duplicated
     assert snapshot.render_open_items(doc2, "skyrim") == text1  # fixpoint
+
+
+# ---------------------------------------------------------- Task 7 fix
+
+HASH_PROSE = """## Notes
+
+#1234 blocked on upstream
+#hashtag note
+"""
+
+
+def test_hash_prefixed_prose_survives_roundtrip():
+    # reproduced data-loss case: a note starting with '#' (no space after
+    # the hash, so it's not real markdown heading syntax) must NOT be
+    # silently dropped by parse -> render -> parse.
+    doc = snapshot.parse_open_items(HASH_PROSE)
+    assert doc["notes"] == ["#1234 blocked on upstream", "#hashtag note"]
+
+    text1 = snapshot.render_open_items(doc, "skyrim")
+    doc2 = snapshot.parse_open_items(text1)
+    assert doc2 == doc
+    assert snapshot.render_open_items(doc2, "skyrim") == text1  # fixpoint
+
+
+def test_canonical_headings_still_parse_as_headings():
+    # Fix 1 (real-heading-syntax-only) must not break the canonical layout:
+    # '## Open' / '## Completed' / '## Notes' all have a space after the
+    # hashes, so they're still recognized as headings and never leak into
+    # notes, and items still land in the right bucket via checkbox authority.
+    text = "## Open\n\n- [ ] pending item\n\n## Completed\n\n- [x] done item\n\n## Notes\n\na stray note\n"
+    doc = snapshot.parse_open_items(text)
+    assert doc["open"] == ["pending item"]
+    assert doc["done"] == ["done item"]
+    assert doc["notes"] == ["a stray note"]
+    # none of the heading lines themselves leaked into notes
+    assert "## Open" not in doc["notes"]
+    assert "## Completed" not in doc["notes"]
+    assert "## Notes" not in doc["notes"]
+
+
+def test_none_placeholder_roundtrips_without_accumulating():
+    # an all-empty doc renders '(none)' placeholders; re-parsing must NOT
+    # turn those placeholders into accumulating notes (fixpoint holds).
+    empty = {"open": [], "done": [], "notes": []}
+    text1 = snapshot.render_open_items(empty, "skyrim")
+    doc1 = snapshot.parse_open_items(text1)
+    assert doc1 == empty
+
+    text2 = snapshot.render_open_items(doc1, "skyrim")
+    assert text2 == text1
+    doc2 = snapshot.parse_open_items(text2)
+    assert doc2 == empty  # still no accumulated "(none)" notes
+
+
+def test_unexpected_heading_tolerated_and_wrong_section_item_renders_correctly():
+    # an unrecognized heading like '## Backlog' must not crash the parser,
+    # and its items are still handled by checkbox authority (not heading).
+    text = ("## Backlog\n\n"
+            "- [x] item placed under Open, but checked\n\n"
+            "## Open\n\n"
+            "- [ ] a real open item\n")
+    doc = snapshot.parse_open_items(text)
+    assert doc["open"] == ["a real open item"]
+    assert doc["done"] == ["item placed under Open, but checked"]
+    assert doc["notes"] == []
+
+    # render places the checked item under '## Completed' regardless of
+    # which section it was hand-typed under - assert the actual rendered
+    # ordering/section, not just the parsed doc.
+    rendered = snapshot.render_open_items(doc, "skyrim")
+    completed_idx = rendered.index("## Completed")
+    open_idx = rendered.index("## Open")
+    item_idx = rendered.index("- [x] item placed under Open, but checked")
+    assert open_idx < completed_idx < item_idx
