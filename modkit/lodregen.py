@@ -227,16 +227,36 @@ def read_lines_bomsafe(path):
 def guarded_clean(data_dir, manifest_lines, patterns, quarantine_dir):
     """Quarantine (never delete) the files a manifest lists out of Data.
 
+    Two passes. Pass 1 VALIDATES every manifest line -- wildcard/directory
+    abort checks, protected-input skip, missing-file detection -- and stages
+    a move plan, WITHOUT touching the filesystem. Pass 2 EXECUTES the staged
+    moves, and is only reached if pass 1 finished without raising. This
+    makes the whole-clean abort actually all-or-nothing: previously the loop
+    moved a file to quarantine the moment it saw a valid line, so a wildcard
+    or directory poison-pill line LATER in the same manifest still raised,
+    but any valid line that preceded it had already been moved -- breaking
+    the "wildcard/directory lines abort the whole clean -- nothing touched"
+    guarantee. Now every line is checked before a single shutil.move runs.
+
     Guards, in order:
       * a manifest line containing a wildcard aborts the whole clean
       * a manifest line naming a directory aborts the whole clean
       * a line matching protected_inputs is SKIPPED and reported
         (polluted manifests are the recorded failure mode -- the manifest
         asked for an input's head, we refuse)
+      * a line whose (normalized) path repeats an already-queued movable
+        line is reported missing, same outcome the old single-pass loop
+        produced for duplicate lines (the first occurrence "claims" the
+        file; the repeat finds nothing left to move)
     Returns {"moved": [...], "protected": [...], "missing": [...]}.
     """
     report = {"moved": [], "protected": [], "missing": []}
     data_dir = Path(data_dir)
+    quarantine_dir = Path(quarantine_dir)
+    plan = []       # [(src, dst), ...] -- populated only if validation fully passes
+    queued = set()  # normalized rel keys already staged to move
+
+    # ---- pass 1: validate every line and stage the plan; no file ops ----
     for raw in manifest_lines:
         rel = raw.strip()
         if not rel:
@@ -253,11 +273,17 @@ def guarded_clean(data_dir, manifest_lines, patterns, quarantine_dir):
         if is_protected(rel, patterns):
             report["protected"].append(rel)
             continue
-        if not src.is_file():
+        key = normalize_rel(rel)
+        if key in queued or not src.is_file():
             report["missing"].append(rel)
             continue
-        dst = Path(quarantine_dir) / rel
+        queued.add(key)
+        plan.append((src, quarantine_dir / rel))
+        report["moved"].append(rel)
+
+    # ---- pass 2: execute -- only reached once pass 1 raised nothing ----
+    for src, dst in plan:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dst))
-        report["moved"].append(rel)
+
     return report

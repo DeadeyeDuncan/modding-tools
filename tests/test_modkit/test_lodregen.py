@@ -291,6 +291,26 @@ def test_guarded_clean_refuses_wildcards_and_dirs(tmp_path):
                                str(tmp_path / "q"))
 
 
+def test_guarded_clean_aborts_before_moving_anything_when_valid_line_precedes_wildcard(tmp_path):
+    """Reviewer-reported ordering bug: a valid, movable line that PRECEDES a
+    wildcard (or directory) poison-pill line must NOT be moved before the
+    abort is raised. guarded_clean now validates every manifest line before
+    executing any shutil.move, so the whole-clean abort really is
+    all-or-nothing -- nothing is touched, not even lines that would have
+    been valid on their own."""
+    data = tmp_path / "Data"
+    quarantine = tmp_path / "q"
+    out_file = _mk(data, "meshes/terrain/tamriel/objects/tamriel.4.0.-1.bto")
+    manifest = [
+        "meshes\\terrain\\tamriel\\objects\\tamriel.4.0.-1.bto",  # valid; moves first under the old code
+        "meshes\\*.nif",                                          # wildcard -> aborts
+    ]
+    with pytest.raises(lodregen.LodregenError, match="wildcard"):
+        lodregen.guarded_clean(str(data), manifest, PROTECTED, str(quarantine))
+    assert out_file.is_file()                # still at its original location
+    assert not quarantine.exists()           # nothing was ever quarantined
+
+
 def test_read_lines_bomsafe(tmp_path):
     f = tmp_path / "m.txt"
     f.write_bytes(b"\xef\xbb\xbf" + b"a.dds\r\nb.dds\r\n\r\n")
