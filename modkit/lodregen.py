@@ -53,3 +53,133 @@ def section(cfg, game):
             f"lodregen.{game}.trio must list exactly 3 plugins in re-enable "
             f"order (last = loads absolute last), got {sec['trio']!r}")
     return sec
+
+
+# ------------------------------------------------------------ run state
+
+RUN_STATE = "lodregen-run.json"
+
+
+def _now():
+    return datetime.datetime.now()
+
+
+def atomic_write_json(path, obj):
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def new_run(sec, game):
+    """Create <holding_root>\\<run_id>\\lodregen-run.json and return it."""
+    run_id = _now().strftime("%Y%m%d-%H%M%S")
+    run_dir = Path(sec["holding_root"]) / run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+    state = {"version": 1, "game": game, "run_id": run_id,
+             "pre": None, "texgen_deployed": None, "post": None}
+    atomic_write_json(run_dir / RUN_STATE, state)
+    return run_dir, state
+
+
+def load_state(run_dir):
+    return json.loads((Path(run_dir) / RUN_STATE).read_text(encoding="utf-8"))
+
+
+def save_state(run_dir, state):
+    atomic_write_json(Path(run_dir) / RUN_STATE, state)
+
+
+def all_runs(holding_root):
+    root = Path(holding_root)
+    if not root.is_dir():
+        return []
+    out = []
+    for d in sorted(root.iterdir()):
+        if d.is_dir() and (d / RUN_STATE).is_file():
+            out.append((d, load_state(d)))
+    return out
+
+
+def pending_runs(holding_root):
+    return [(d, s) for d, s in all_runs(holding_root) if s.get("post") is None]
+
+
+# ------------------------------------------------------------ status
+
+def cmd_status(args, cfg=None):
+    cfg = cfg if cfg is not None else config.load()
+    sec = section(cfg, args.game)
+    runs = all_runs(sec["holding_root"])
+    if not runs:
+        print(f"lodregen[{args.game}]: no regen runs recorded under "
+              f"{sec['holding_root']}")
+        return 0
+    pending = 0
+    for d, s in runs:
+        if s.get("post") is not None:
+            print(f"  {s['run_id']}  COMPLETE  post {s['post']['stamp']}")
+        elif s.get("pre") is None:
+            pending += 1
+            print(f"  {s['run_id']}  BROKEN    pre never finished -- inspect {d}")
+        else:
+            pending += 1
+            tex = ("texgen deployed" if s.get("texgen_deployed")
+                   else "texgen NOT deployed")
+            print(f"  {s['run_id']}  PENDING   pre {s['pre']['stamp']}  ({tex})"
+                  f"  -- finish with: modkit lodregen post --game {s['game']}")
+    if pending:
+        print(f"{pending} PENDING regen run(s): the game is mid-regen "
+              f"(trio plugins held aside) -- do NOT launch it until post runs.")
+        return 2
+    return 0
+
+
+# ------------------------------------------------------------ CLI wiring
+
+def cmd_pre(args, cfg=None, preset=None):
+    raise LodregenError("cmd_pre is implemented in Task 4 of the lodregen plan")
+
+
+def cmd_post(args, cfg=None, preset=None):
+    raise LodregenError("cmd_post is implemented in Task 6 of the lodregen plan")
+
+
+def register(sub):
+    """Attach the lodregen subcommand tree to the modkit CLI subparsers."""
+    p = sub.add_parser(
+        "lodregen",
+        help="pre/post guards around a manual PGPatcher->TexGen->DynDOLOD regen")
+    lsub = p.add_subparsers(dest="lodregen_cmd", required=True)
+
+    pre = lsub.add_parser(
+        "pre", help="bracket start: snapshot, trio aside, guarded clean, "
+                    "print the manual GUI ritual")
+    pre.add_argument("--game", required=True)
+    pre.add_argument("--no-pgpatcher", action="store_true",
+                     help="this regen skips the PGPatcher stage")
+    pre.add_argument("--clean-texgen", action="store_true",
+                     help="ALSO quarantine old TexGen output (default: never "
+                          "-- wiki supersede 2026-06-25: the TexGen pre-clean "
+                          "was the recurring failure; the stitched warning is "
+                          "harmless, click Ignore)")
+    pre.add_argument("--force", action="store_true",
+                     help="proceed past a pending run / missing tool exes")
+    pre.set_defaults(func=cmd_pre)
+
+    post = lsub.add_parser(
+        "post", help="bracket end: freshness gate, deploy, trio re-enable, "
+                     "masters verify, Plugins.txt diff, ledger record")
+    post.add_argument("--game", required=True)
+    post.add_argument("--stage", choices=["texgen", "full"], default="full",
+                      help="'texgen' = mid-ritual TexGen_Output deploy; "
+                           "'full' (default) = after DynDOLOD")
+    post.add_argument("--run", help="run dir to finish (default: latest pending)")
+    post.add_argument("--force", action="store_true",
+                      help="proceed past freshness/masters failures (records "
+                           "them as warnings)")
+    post.set_defaults(func=cmd_post)
+
+    st = lsub.add_parser("status", help="list pending/complete regen runs")
+    st.add_argument("--game", required=True)
+    st.set_defaults(func=cmd_status)

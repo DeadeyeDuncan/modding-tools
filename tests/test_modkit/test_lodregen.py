@@ -83,3 +83,73 @@ def test_section_rejects_wrong_trio_shape(tmp_path):
     cfg["lodregen"]["skyrim"]["trio"] = ["DynDOLOD.esm", "Occlusion.esp"]
     with pytest.raises(lodregen.LodregenError, match="exactly 3"):
         lodregen.section(cfg, "skyrim")
+
+
+# ---------------------------------------------------------------- Task 2
+
+def test_new_run_creates_state_file(tmp_path):
+    sec = fixture_section(tmp_path)
+    run_dir, state = lodregen.new_run(sec, "skyrim")
+    assert run_dir.is_dir()
+    assert run_dir.parent == Path(sec["holding_root"])
+    on_disk = lodregen.load_state(run_dir)
+    assert on_disk == state
+    assert on_disk["game"] == "skyrim"
+    assert on_disk["pre"] is None and on_disk["post"] is None
+    assert on_disk["run_id"] == run_dir.name
+
+
+def test_pending_runs_and_save_state(tmp_path):
+    sec = fixture_section(tmp_path)
+    run_dir, state = lodregen.new_run(sec, "skyrim")
+    assert len(lodregen.pending_runs(sec["holding_root"])) == 1
+    state["pre"] = {"stamp": "2026-07-11T10:00:00", "epoch": 1.0}
+    state["post"] = {"stamp": "2026-07-11T12:00:00"}
+    lodregen.save_state(run_dir, state)
+    assert lodregen.pending_runs(sec["holding_root"]) == []
+    assert len(lodregen.all_runs(sec["holding_root"])) == 1
+
+
+def test_pending_runs_empty_when_no_holding_root(tmp_path):
+    assert lodregen.pending_runs(str(tmp_path / "nope")) == []
+
+
+def test_status_lists_pending_and_exits_2(tmp_path, capsys):
+    sec = fixture_section(tmp_path)
+    cfg = {"lodregen": {"skyrim": sec}}
+    run_dir, state = lodregen.new_run(sec, "skyrim")
+    state["pre"] = {"stamp": "2026-07-11T10:00:00", "epoch": 1.0}
+    lodregen.save_state(run_dir, state)
+    args = SimpleNamespace(game="skyrim")
+    rc = lodregen.cmd_status(args, cfg=cfg)
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "PENDING" in out
+    assert "texgen NOT deployed" in out
+    assert "modkit lodregen post" in out
+
+
+def test_status_clean_when_complete(tmp_path, capsys):
+    sec = fixture_section(tmp_path)
+    cfg = {"lodregen": {"skyrim": sec}}
+    run_dir, state = lodregen.new_run(sec, "skyrim")
+    state["pre"] = {"stamp": "2026-07-11T10:00:00", "epoch": 1.0}
+    state["post"] = {"stamp": "2026-07-11T12:00:00"}
+    lodregen.save_state(run_dir, state)
+    rc = lodregen.cmd_status(SimpleNamespace(game="skyrim"), cfg=cfg)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "COMPLETE" in out
+
+
+def test_register_wires_three_subcommands():
+    import argparse
+    p = argparse.ArgumentParser()
+    sub = p.add_subparsers(dest="cmd")
+    lodregen.register(sub)
+    args = p.parse_args(["lodregen", "status", "--game", "skyrim"])
+    assert args.func is lodregen.cmd_status
+    args = p.parse_args(["lodregen", "pre", "--game", "skyrim", "--no-pgpatcher"])
+    assert args.func is lodregen.cmd_pre and args.no_pgpatcher
+    args = p.parse_args(["lodregen", "post", "--game", "skyrim", "--stage", "texgen"])
+    assert args.func is lodregen.cmd_post and args.stage == "texgen"
