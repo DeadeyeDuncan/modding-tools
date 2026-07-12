@@ -3,6 +3,12 @@
 Exit codes: 0 clean/success, 1 error or verify findings, 2 warned (forceable gate).
 """
 import argparse
+
+PIPELINE = """typical install pipeline (skyrim):
+  intake -> stage -> fomod (if present) -> dllvet -> esp -> conflicts -> deploy -> verify
+judgment gates (dllvet verdicts, FOMOD picks, conflict decisions) are yours between steps.
+run `modkit status --game <game>` at session start and after crashes.
+exit codes: 0 clean, 1 error/findings, 2 warned or refused-pending-vets (--force)."""
 import datetime
 import json
 import re
@@ -448,6 +454,52 @@ def register_verify(sub, common):
     sp.set_defaults(func=cmd_verify)
 
 
+def cmd_status(args):
+    from modkit import state
+    preset = _preset(args)
+    root = Path(preset.STAGING_ROOT)
+    stagings = sorted(d for d in root.iterdir()
+                      if d.is_dir() and (d / "install.json").is_file()) \
+        if root.is_dir() else []
+    if not stagings:
+        safe_print(f"no staging dirs for {preset.NAME} ({root})")
+        return 0
+    incomplete = 0
+    for d in stagings:
+        try:
+            st = state.InstallState.load(str(d))
+        except state.StateError as ex:
+            safe_print(f"?? {d.name}: {ex}")
+            incomplete += 1
+            continue
+        pending = st.missing_applicable()
+        undone = [s for s in ("deployed", "recorded", "verified")
+                  if not st.data["stages"].get(s)]
+        vres = st.data["vet_results"].get("verify")
+        vtxt = (f"verify {'OK' if vres['ok'] else 'FAILED'} at {vres['ts']}"
+                if vres else "never verified")
+        if pending or undone:
+            incomplete += 1
+            safe_print(f"INCOMPLETE {d.name} [{st.data['mod']}]")
+            if pending:
+                safe_print(f"  pending vets: {', '.join(pending)}")
+            if undone:
+                safe_print(f"  not done: {', '.join(undone)}")
+            safe_print(f"  {vtxt}")
+        elif args.all:
+            safe_print(f"complete   {d.name} [{st.data['mod']}] - {vtxt}")
+    safe_print(f"{len(stagings)} staging dir(s), {incomplete} incomplete")
+    return 0
+
+
+def register_status(sub, common):
+    sp = sub.add_parser("status", parents=[common],
+                        help="staging dirs with incomplete stage chains + last "
+                             "verify result (run at session start / after crashes)")
+    sp.add_argument("--all", action="store_true", help="also list complete installs")
+    sp.set_defaults(func=cmd_status)
+
+
 def _preset(args):
     cfg = config.load(getattr(args, "config", None))
     game = getattr(args, "game", None)
@@ -467,6 +519,7 @@ def _add_globals(parser):
 
 def build_parser():
     p = argparse.ArgumentParser(prog="modkit.py", description=__doc__,
+                                epilog=PIPELINE,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     _add_globals(p)
     common = argparse.ArgumentParser(add_help=False)
@@ -488,6 +541,7 @@ def _register_all(sub, common):
     register_deploy(sub, common)
     register_remove(sub, common)
     register_verify(sub, common)
+    register_status(sub, common)
 
 
 def main(argv=None):
