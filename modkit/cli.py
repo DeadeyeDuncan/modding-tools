@@ -157,6 +157,33 @@ def register_stage(sub, common):
     sp.set_defaults(func=cmd_stage)
 
 
+def cmd_conflicts(args):
+    from modkit import conflicts, state
+    preset = _preset(args)
+    staging = _staging_for(args, preset)
+    st = state.InstallState.load(str(staging))
+    pay = state.payload_root(staging)
+    hits = conflicts.sweep(preset, pay)
+    if not hits:
+        safe_print("no file overlaps vs Data")
+    for h in hits:
+        owner = (f"currently owned by {h['owner']}" if h["owner"]
+                 else "owner unknown (no manifest claims it)")
+        safe_print(f"OVERLAP {h['path']} - {owner}; deploying makes this mod win")
+    st.data["vet_results"]["conflicts"] = {
+        "overlaps": len(hits), "paths": [h["path"] for h in hits][:200]}
+    st.stamp("conflicts")
+    return 2 if hits else 0
+
+
+def register_conflicts(sub, common):
+    sp = sub.add_parser("conflicts", parents=[common],
+                        help="file-overlap sweep: payload vs Data + manifests; "
+                             "names the losing mod per overlap")
+    sp.add_argument("--staging", default=None, help="staging dir (default: latest)")
+    sp.set_defaults(func=cmd_conflicts)
+
+
 def _staging_for(args, preset):
     from modkit import state
     if getattr(args, "staging", None):
@@ -397,6 +424,7 @@ def _register_all(sub, common):
     register_esp(sub, common)
     register_dllvet(sub, common)
     register_plugins(sub, common)
+    register_conflicts(sub, common)
 
 
 def main(argv=None):
