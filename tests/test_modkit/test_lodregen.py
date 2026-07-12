@@ -345,14 +345,21 @@ def test_running_processes_parses_tasklist_csv():
     assert lodregen.running_processes(names, csv_text=TASKLIST_GAME) == ["SkyrimSE.exe"]
 
 
-def make_env(tmp_path, monkeypatch, trio_in_data=True, ledger_list_out=None):
+def make_env(tmp_path, monkeypatch, trio_in_data=True, ledger_list_out=None,
+            trio_in_plugins=True):
     """Fixture game env: fake Data + real Plugins.txt handled by the REAL
-    modkit.pluginstxt, fake ledger_bridge, idle tasklist."""
+    modkit.pluginstxt, fake ledger_bridge, idle tasklist.
+
+    trio_in_plugins=False builds a Plugins.txt with the trio LINES ABSENT
+    entirely (not merely disabled) -- the genuine first-ever-DynDOLOD-setup
+    condition, where the trio plugins are tool-generated and have no
+    Plugins.txt entry at all yet."""
     data = tmp_path / "Data"
     data.mkdir(exist_ok=True)
     plugins = tmp_path / "Plugins.txt"
-    lines = ["*Unofficial Skyrim Special Edition Patch.esp", "*SomeMod.esp",
-             "*DynDOLOD.esm", "*DynDOLOD.esp", "*Occlusion.esp"]
+    lines = ["*Unofficial Skyrim Special Edition Patch.esp", "*SomeMod.esp"]
+    if trio_in_plugins:
+        lines += ["*DynDOLOD.esm", "*DynDOLOD.esp", "*Occlusion.esp"]
     plugins.write_bytes(b"\xef\xbb\xbf"
                         + ("\r\n".join(lines) + "\r\n").encode("utf-8"))
     (tmp_path / "backups").mkdir(exist_ok=True)
@@ -466,6 +473,30 @@ def test_pre_refuses_when_game_running(tmp_path, monkeypatch, capsys):
     assert lodregen.pending_runs(env.sec["holding_root"]) == []
 
 
+def test_pre_refuses_when_game_running_even_with_force(tmp_path, monkeypatch, capsys):
+    """The confirmed-running refusal (the `if procs:` block) has no --force
+    bypass by design -- unlike the pending-run, missing-tool, and
+    GameStateUnknown gates, which all honor --force. This locks that in: a
+    future edit that adds `and not args.force` to the confirmed-running
+    check would still pass test_pre_refuses_when_game_running (force
+    defaults to False there) but must fail here."""
+    env = make_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(lodregen, "running_processes",
+                        lambda names: ["SkyrimSE.exe"])
+    plugins_before = env.plugins.read_bytes()
+    rc = lodregen.cmd_pre(_pre_args(force=True), cfg=env.cfg, preset=env.preset)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "REFUSED" in out
+    # nothing mutated: no run-state written, trio untouched, Plugins.txt
+    # byte-identical
+    assert lodregen.pending_runs(env.sec["holding_root"]) == []
+    assert lodregen.all_runs(env.sec["holding_root"]) == []
+    for name in env.sec["trio"]:
+        assert (env.data / name).is_file()
+    assert env.plugins.read_bytes() == plugins_before
+
+
 def test_pre_refuses_when_pending_run_exists(tmp_path, monkeypatch, capsys):
     env = make_env(tmp_path, monkeypatch)
     lodregen.new_run(env.sec, "skyrim")   # simulate an interrupted run
@@ -485,11 +516,38 @@ def test_pre_texgen_not_cleaned_by_default(tmp_path, monkeypatch):
 
 
 def test_pre_first_run_tolerates_missing_trio_and_entries(tmp_path, monkeypatch, capsys):
-    env = make_env(tmp_path, monkeypatch, trio_in_data=False, ledger_list_out="")
+    """Genuine first-ever DynDOLOD setup: the trio plugins have NO Plugins.txt
+    line at all (not merely disabled) AND no file in Data yet.
+    pluginstxt.disable() raises PluginsTxtError for a plugin with no line --
+    cmd_pre must swallow that per-name, not crash mid-bracket, and still
+    complete the bracket (snapshot + run-state + GUI sequence) with a WARN."""
+    env = make_env(tmp_path, monkeypatch, trio_in_data=False,
+                   trio_in_plugins=False, ledger_list_out="")
     rc = lodregen.cmd_pre(_pre_args(), cfg=env.cfg, preset=env.preset)
     out = capsys.readouterr().out
-    assert rc == 2          # warnings, not failure
+    assert rc == 2          # warnings, not failure -- and, critically, no traceback
+    assert "Traceback" not in out
     assert "trio file(s) not in Data" in out
+    for name in env.sec["trio"]:
+        assert name in out
+
+    # bracket still fully opened despite the absent trio
+    runs = lodregen.pending_runs(env.sec["holding_root"])
+    assert len(runs) == 1
+    run_dir, state = runs[0]
+    assert state["pre"] is not None
+    assert state["pre"]["trio_moved"] == []
+    assert sorted(state["pre"]["trio_absent"]) == sorted(env.sec["trio"])
+    # Plugins.txt snapshot still taken
+    assert Path(state["pre"]["plugins_snapshot"]).is_file()
+    # trio lines genuinely absent -- pluginstxt.read() has no trace of them
+    from modkit import pluginstxt
+    all_names = [ln.lstrip("*").strip().lower() for ln in pluginstxt.read(env.preset)]
+    for name in env.sec["trio"]:
+        assert name.lower() not in all_names
+    # GUI ritual still printed
+    assert "NEVER launch" in out
+    assert "TexGenx64.exe" in out
 
 
 # ---- extra: game-state 3-state handling (deploy.py's GameStateUnknown

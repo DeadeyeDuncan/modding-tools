@@ -251,12 +251,19 @@ def cmd_pre(args, cfg=None, preset=None):
     trio_dir.mkdir()
     moved, absent = [], []
     for name in sec["trio"]:
-        pluginstxt.disable(preset, name)
+        try:
+            pluginstxt.disable(preset, name)
+        except pluginstxt.PluginsTxtError:
+            # no line at all (first-ever DynDOLOD setup: the trio plugins are
+            # tool-generated and genuinely have no Plugins.txt entry yet) --
+            # fold into the same absent/warning path as a missing Data file,
+            # never crash mid-bracket.
+            absent.append(name)
         src = Path(preset.DATA_DIR) / name
         if src.is_file():
             shutil.move(str(src), str(trio_dir / name))
             moved.append(name)
-        else:
+        elif name not in absent:
             absent.append(name)
     if absent:
         warnings.append("trio file(s) not in Data (first regen, or already "
