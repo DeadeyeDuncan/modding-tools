@@ -631,7 +631,7 @@ def cmd_diff(args):
 
 
 def register(sub):
-    """Wire the snapshot subcommand into the modkit CLI.
+    """Wire the snapshot + openitems subcommands into the modkit CLI.
 
     `sub` is the top-level argparse subparsers object in modkit\\cli.py.
     Handlers are plain `func(args) -> int` set via set_defaults, matching
@@ -652,6 +652,24 @@ def register(sub):
     d.add_argument("--game", required=True, help="skyrim | cp77")
     d.add_argument("--against", help="explicit snapshot .json (default: latest)")
     d.set_defaults(func=cmd_diff)
+
+    op = sub.add_parser(
+        "openitems", help="per-game pending-fixes tracker (open-items.md)")
+    osub = op.add_subparsers(dest="openitems_cmd", required=True)
+
+    a = osub.add_parser("add", help="add an open item (dated)")
+    a.add_argument("--game", required=True, help="skyrim | cp77")
+    a.add_argument("text", help="item text")
+    a.set_defaults(func=cmd_openitems_add)
+
+    dn = osub.add_parser("done", help="complete the single item matching a substring")
+    dn.add_argument("--game", required=True, help="skyrim | cp77")
+    dn.add_argument("text", help="substring uniquely matching one open item")
+    dn.set_defaults(func=cmd_openitems_done)
+
+    ls = osub.add_parser("list", help="list open items (run at session start)")
+    ls.add_argument("--game", required=True, help="skyrim | cp77")
+    ls.set_defaults(func=cmd_openitems_list)
 
 
 # --------------------------------------------------------------------------
@@ -716,3 +734,105 @@ def render_open_items(doc, game):
         out += doc["notes"]
     out.append("")
     return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# openitems CLI handlers
+# --------------------------------------------------------------------------
+
+def open_items_path(preset):
+    return manual_dir(preset) / "open-items.md"
+
+
+def _today():
+    """Injectable date seam - tests monkeypatch this attribute instead of an
+    inline, un-mockable `datetime.date.today()` call site, matching the
+    existing injectable-clock pattern (capture(now=None), take(stamp=None))."""
+    return datetime.date.today().isoformat()
+
+
+class OpenItemsIOError(Exception):
+    """Raised when open-items.md can't be read (never propagated past
+    cmd_openitems_add/done/list - always caught there and printed cleanly)."""
+
+
+def _load_doc(path):
+    """read_text() + parse_open_items(), with a clean error on read failure.
+
+    read_text() already handles "missing file" (returns None -> ""). What it
+    can't handle is a *present-but-unreadable* file (permission denied, a
+    transient share/AV lock) - Path.read_bytes() raises OSError there, and
+    nothing upstream of this call was catching it, so it would otherwise
+    surface as a raw traceback through cli.py main() (the lodregen/snapshot
+    lesson: unhandled exception types must never reach the user as a dump).
+    """
+    try:
+        text = read_text(path)
+    except OSError as ex:
+        raise OpenItemsIOError(f"could not read {path}: {ex}") from ex
+    return parse_open_items(text or "")
+
+
+def cmd_openitems_add(args):
+    preset, _ = _ctx(args)
+    path = open_items_path(preset)
+    try:
+        doc = _load_doc(path)
+    except OpenItemsIOError as ex:
+        safe_print(f"ERROR: {ex}")
+        return 1
+    body = f"{_today()} - {args.text}"
+    doc["open"].append(body)
+    try:
+        atomic_write(path, render_open_items(doc, args.game))
+    except OSError as ex:
+        safe_print(f"ERROR: could not write {path}: {ex}")
+        return 1
+    safe_print(f"added open item: {body}")
+    return 0
+
+
+def cmd_openitems_done(args):
+    preset, _ = _ctx(args)
+    path = open_items_path(preset)
+    try:
+        doc = _load_doc(path)
+    except OpenItemsIOError as ex:
+        safe_print(f"ERROR: {ex}")
+        return 1
+    needle = args.text.lower()
+    hits = [b for b in doc["open"] if needle in b.lower()]
+    if len(hits) != 1:
+        safe_print(f"ERROR: {len(hits)} open item(s) match {args.text!r} - "
+                   f"need exactly 1:")
+        for b in (hits or doc["open"]):
+            safe_print(f"  - [ ] {b}")
+        return 1
+    doc["open"].remove(hits[0])
+    doc["done"].append(f"{hits[0]} (done {_today()})")
+    try:
+        atomic_write(path, render_open_items(doc, args.game))
+    except OSError as ex:
+        safe_print(f"ERROR: could not write {path}: {ex}")
+        return 1
+    safe_print(f"completed: {hits[0]}")
+    return 0
+
+
+def cmd_openitems_list(args):
+    preset, _ = _ctx(args)
+    path = open_items_path(preset)
+    try:
+        doc = _load_doc(path)
+    except OpenItemsIOError as ex:
+        safe_print(f"ERROR: {ex}")
+        return 1
+    if not doc["open"]:
+        safe_print(f"no open items for {args.game} "
+                   f"({len(doc['done'])} completed) - {path}")
+        return 0
+    safe_print(f"open items - {args.game}:")
+    for b in doc["open"]:
+        safe_print(f"  - [ ] {b}")
+    safe_print(f"{len(doc['open'])} open, {len(doc['done'])} completed - {path}")
+    return 0

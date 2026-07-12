@@ -752,3 +752,179 @@ def test_unexpected_heading_tolerated_and_wrong_section_item_renders_correctly()
     open_idx = rendered.index("## Open")
     item_idx = rendered.index("- [x] item placed under Open, but checked")
     assert open_idx < completed_idx < item_idx
+
+
+# ---------------------------------------------------------------- Task 8
+
+def test_register_parses_openitems_cmds():
+    a = _cli(["openitems", "add", "--game", "skyrim", "fix the thing"])
+    assert a.func is snapshot.cmd_openitems_add and a.text == "fix the thing"
+    a = _cli(["openitems", "done", "--game", "skyrim", "thing"])
+    assert a.func is snapshot.cmd_openitems_done
+    a = _cli(["openitems", "list", "--game", "cp77"])
+    assert a.func is snapshot.cmd_openitems_list
+
+
+def test_openitems_add_creates_file(tmp_path, monkeypatch, capsys):
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    rc = snapshot.cmd_openitems_add(
+        _cli(["openitems", "add", "--game", "skyrim", "decide iTexMipMapSkip"]))
+    assert rc == 0
+    path = tmp_path / "manual" / "open-items.md"
+    doc = snapshot.parse_open_items(snapshot.read_text(path))
+    assert len(doc["open"]) == 1 and doc["open"][0].endswith("- decide iTexMipMapSkip")
+
+
+def test_openitems_done_moves_item(tmp_path, monkeypatch, capsys):
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    snapshot.cmd_openitems_add(_cli(["openitems", "add", "--game", "skyrim", "alpha task"]))
+    snapshot.cmd_openitems_add(_cli(["openitems", "add", "--game", "skyrim", "beta task"]))
+    rc = snapshot.cmd_openitems_done(_cli(["openitems", "done", "--game", "skyrim", "alpha"]))
+    assert rc == 0
+    doc = snapshot.parse_open_items(
+        snapshot.read_text(tmp_path / "manual" / "open-items.md"))
+    assert len(doc["open"]) == 1 and "beta task" in doc["open"][0]
+    assert len(doc["done"]) == 1 and "alpha task" in doc["done"][0]
+    assert "(done " in doc["done"][0]
+
+
+def test_openitems_done_ambiguous_or_none_rc1(tmp_path, monkeypatch, capsys):
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    snapshot.cmd_openitems_add(_cli(["openitems", "add", "--game", "skyrim", "task one"]))
+    snapshot.cmd_openitems_add(_cli(["openitems", "add", "--game", "skyrim", "task two"]))
+    capsys.readouterr()
+    rc = snapshot.cmd_openitems_done(_cli(["openitems", "done", "--game", "skyrim", "task"]))
+    assert rc == 1 and "2 open item(s) match" in capsys.readouterr().out
+    rc = snapshot.cmd_openitems_done(_cli(["openitems", "done", "--game", "skyrim", "zzz"]))
+    assert rc == 1 and "0 open item(s) match" in capsys.readouterr().out
+    # nothing was moved on error
+    doc = snapshot.parse_open_items(
+        snapshot.read_text(tmp_path / "manual" / "open-items.md"))
+    assert len(doc["open"]) == 2 and doc["done"] == []
+
+
+def test_openitems_list_output(tmp_path, monkeypatch, capsys):
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    rc = snapshot.cmd_openitems_list(_cli(["openitems", "list", "--game", "skyrim"]))
+    assert rc == 0 and "no open items" in capsys.readouterr().out
+    snapshot.cmd_openitems_add(_cli(["openitems", "add", "--game", "skyrim", "gamma"]))
+    capsys.readouterr()
+    rc = snapshot.cmd_openitems_list(_cli(["openitems", "list", "--game", "skyrim"]))
+    out = capsys.readouterr().out
+    assert rc == 0 and "gamma" in out and "1 open, 0 completed" in out
+
+
+# ---------------------------------------------------------- Task 8 date injection
+# The brief's cmd_openitems_add/done stamp dates via a `_today()` module-level
+# seam (not an inline `datetime.date.today()` call site) so tests can force a
+# deterministic date via monkeypatch - the same "injectable clock" pattern
+# already used by capture(..., now=None) and take(..., stamp=None) above.
+
+def test_openitems_add_date_is_injectable_and_deterministic(tmp_path, monkeypatch, capsys):
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    monkeypatch.setattr(snapshot, "_today", lambda: "2026-07-11")
+    rc = snapshot.cmd_openitems_add(
+        _cli(["openitems", "add", "--game", "skyrim", "injected-date item"]))
+    assert rc == 0
+    doc = snapshot.parse_open_items(
+        snapshot.read_text(tmp_path / "manual" / "open-items.md"))
+    assert doc["open"][0] == "2026-07-11 - injected-date item"
+
+
+def test_openitems_done_date_is_injectable_and_deterministic(tmp_path, monkeypatch, capsys):
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    monkeypatch.setattr(snapshot, "_today", lambda: "2026-07-01")
+    snapshot.cmd_openitems_add(_cli(["openitems", "add", "--game", "skyrim", "solo task"]))
+    monkeypatch.setattr(snapshot, "_today", lambda: "2026-07-11")
+    rc = snapshot.cmd_openitems_done(
+        _cli(["openitems", "done", "--game", "skyrim", "solo"]))
+    assert rc == 0
+    doc = snapshot.parse_open_items(
+        snapshot.read_text(tmp_path / "manual" / "open-items.md"))
+    assert doc["done"][0] == "2026-07-01 - solo task (done 2026-07-11)"
+
+
+# ---------------------------------------------------------- Task 8 write-failure backstop
+# atomic_write can raise OSError (disk full, permission denied) on a real
+# filesystem; cmd_openitems_add/done must surface that as a clean ERROR line
+# and rc 1, never an uncaught traceback bubbling up through cli.py main()
+# (the lodregen/snapshot lesson - see cmd_take's Fix 4 backstop above).
+
+def test_openitems_add_write_failure_surfaces_cleanly(tmp_path, monkeypatch, capsys):
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    monkeypatch.setattr(snapshot, "atomic_write",
+                        lambda path, text: (_ for _ in ()).throw(OSError("disk full")))
+    rc = snapshot.cmd_openitems_add(
+        _cli(["openitems", "add", "--game", "skyrim", "x"]))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Traceback" not in out
+    assert "ERROR" in out and "disk full" in out
+
+
+def test_openitems_done_write_failure_surfaces_cleanly(tmp_path, monkeypatch, capsys):
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    snapshot.cmd_openitems_add(_cli(["openitems", "add", "--game", "skyrim", "alpha task"]))
+    capsys.readouterr()
+    monkeypatch.setattr(snapshot, "atomic_write",
+                        lambda path, text: (_ for _ in ()).throw(OSError("disk full")))
+    rc = snapshot.cmd_openitems_done(
+        _cli(["openitems", "done", "--game", "skyrim", "alpha"]))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Traceback" not in out
+    assert "ERROR" in out and "disk full" in out
+
+
+# ---------------------------------------------------------- Task 8 read-failure backstop
+# A present-but-unreadable open-items.md (permission denied, AV/share lock)
+# raises OSError from read_text() itself - a distinct failure mode from the
+# write-failure tests above. cmd_openitems_add/done/list must all surface
+# this as a clean ERROR + rc 1 via the _load_doc() / OpenItemsIOError seam,
+# never a raw traceback.
+
+def _boom_read_text(path):
+    raise OSError("permission denied")
+
+
+def test_openitems_add_read_failure_surfaces_cleanly(tmp_path, monkeypatch, capsys):
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    monkeypatch.setattr(snapshot, "read_text", _boom_read_text)
+    rc = snapshot.cmd_openitems_add(
+        _cli(["openitems", "add", "--game", "skyrim", "x"]))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Traceback" not in out
+    assert "ERROR" in out and "permission denied" in out
+
+
+def test_openitems_done_read_failure_surfaces_cleanly(tmp_path, monkeypatch, capsys):
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    monkeypatch.setattr(snapshot, "read_text", _boom_read_text)
+    rc = snapshot.cmd_openitems_done(
+        _cli(["openitems", "done", "--game", "skyrim", "x"]))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Traceback" not in out
+    assert "ERROR" in out and "permission denied" in out
+
+
+def test_openitems_list_read_failure_surfaces_cleanly(tmp_path, monkeypatch, capsys):
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    monkeypatch.setattr(snapshot, "read_text", _boom_read_text)
+    rc = snapshot.cmd_openitems_list(_cli(["openitems", "list", "--game", "skyrim"]))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Traceback" not in out
+    assert "ERROR" in out and "permission denied" in out
