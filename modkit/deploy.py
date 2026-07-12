@@ -1,10 +1,13 @@
 """Deploy engine. Only deploy and remove touch game dirs.
 robocopy exit codes < 8 are SUCCESS (>= 8 raises). Ledger writes go through
 ledger.py exclusively (its validation + backups apply)."""
+import datetime
+import json
+import shutil
 import subprocess
 from pathlib import Path
 
-from modkit import ledger_bridge, pluginstxt, state
+from modkit import ledger_bridge, pluginstxt, state, tes4
 
 
 class DeployError(Exception):
@@ -131,4 +134,92 @@ def run_deploy(preset, staging_dir, anchor, force, log):
         return 1
     log(out.strip())
     st.stamp("recorded")
+    return 0
+
+
+def run_remove(preset, mod_name, reason, force, log):
+    if preset.DATA_DIR is None:
+        log(f"ERROR: game {preset.NAME!r} has no data_dir - remove unsupported")
+        return 1
+    if game_running(preset):
+        log(f"ERROR: game process running ({', '.join(preset.PROCESS_NAMES)}) - "
+            "close it first (this gate has no --force)")
+        return 1
+    code, out = ledger_bridge.run(["get", "--name", mod_name,
+                                   *ledger_bridge.game_args(preset)])
+    if code != 0:
+        log(f"ERROR: ledger get failed (exit {code}): {out.strip()}")
+        return 1
+    entry = json.loads(out)
+    if entry.get("removed"):
+        log(f"ERROR: {entry['name']!r} already removed on {entry['removed']}")
+        return 1
+    manifest = entry.get("manifest")
+    if not manifest:
+        log("ERROR: ledger entry has no manifest pointer - manifest-driven removal "
+            "impossible. Quarantine by hand, then `ledger.py remove --reason ...`")
+        return 1
+    mpath = Path(preset.MANIFESTS_DIR).parent / manifest
+    if not mpath.is_file():
+        log(f"ERROR: manifest file missing: {mpath}")
+        return 1
+    raw = mpath.read_bytes().decode("utf-8-sig").replace("\r\n", "\n")
+    paths = [l.strip() for l in raw.split("\n")
+             if l.strip() and not l.strip().startswith("#")]
+    plugins = entry.get("plugin")
+    plugins = [plugins] if isinstance(plugins, str) else list(plugins or [])
+    dependents = []
+    if plugins and preset.PLUGINS_TXT:
+        ours = {p.lower() for p in plugins}
+        data_dir = Path(preset.DATA_DIR)
+        for line in pluginstxt.read(preset):
+            if not line.startswith("*"):
+                continue
+            name = line.lstrip("*").strip()
+            if name.lower() in ours or not (data_dir / name).is_file():
+                continue
+            try:
+                hdr = tes4.parse_header(data_dir / name)
+            except tes4.Tes4Error:
+                continue
+            hits = [m for m in hdr["masters"] if m.lower() in ours]
+            if hits:
+                dependents.append((name, hits))
+    if dependents and not force:
+        for name, hits in dependents:
+            log(f"WARN {name} masters {', '.join(hits)} - removing would CTD it")
+        log("remove REFUSED (master dependencies) - re-run with --force to override")
+        return 2
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    qdir = Path(preset.BACKUPS_DIR) / f"removed-{state.slug(mod_name)}-{ts}"
+    data_dir = Path(preset.DATA_DIR)
+    moved, absent = 0, []
+    for rel in paths:
+        rel2 = rel[5:] if rel.lower().startswith("data\\") else rel
+        src = data_dir / rel2
+        if not src.is_file():
+            absent.append(rel2)
+            continue
+        dest = qdir / rel2
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+        moved += 1
+    log(f"quarantined {moved}/{len(paths)} manifest files -> {qdir}")
+    for a in absent[:20]:
+        log(f"  already absent: {a} (overwritten by a later mod, or drift)")
+    for p in plugins:
+        try:
+            pluginstxt.disable(preset, p)
+            log(f"disabled in Plugins.txt: {p}")
+        except pluginstxt.PluginsTxtError as ex:
+            log(f"  note: {ex}")
+    code, out = ledger_bridge.run(["remove", "--name", mod_name, "--reason", reason,
+                                   "--to", str(qdir), *ledger_bridge.game_args(preset)])
+    if code != 0:
+        log(f"ERROR: ledger remove failed (exit {code}):\n{out.strip()}")
+        log(f"files ARE quarantined at {qdir} - run ledger.py remove manually")
+        return 1
+    log(out.strip())
+    log(f"count reconciled: {moved} moved, {len(absent)} already absent, "
+        f"{len(paths)} in manifest")
     return 0

@@ -412,6 +412,27 @@ def register_deploy(sub, common):
     sp.set_defaults(func=cmd_deploy)
 
 
+def cmd_remove(args):
+    from modkit import deploy, pluginstxt
+    preset = _preset(args)
+    try:
+        return deploy.run_remove(preset, args.mod, args.reason, args.force, safe_print)
+    except (deploy.DeployError, pluginstxt.PluginsTxtError) as ex:
+        safe_print(f"ERROR: {ex}")
+        return 1
+
+
+def register_remove(sub, common):
+    sp = sub.add_parser("remove", parents=[common],
+                        help="manifest-driven removal: quarantine (never delete), "
+                             "masters-check-before-disable, ledger.py remove")
+    sp.add_argument("mod", help="ledger entry name")
+    sp.add_argument("--reason", required=True, help="recorded as removedReason")
+    sp.add_argument("--force", action="store_true",
+                    help="override the master-dependency refusal")
+    sp.set_defaults(func=cmd_remove)
+
+
 def cmd_verify(args):
     from modkit import verify
     preset = _preset(args)
@@ -465,6 +486,7 @@ def _register_all(sub, common):
     register_plugins(sub, common)
     register_conflicts(sub, common)
     register_deploy(sub, common)
+    register_remove(sub, common)
     register_verify(sub, common)
 
 
