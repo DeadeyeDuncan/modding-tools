@@ -165,3 +165,139 @@ def test_capture_steam_malformed_acf_warns_not_raises(tmp_path):
     assert len(warns) == 1
     assert "unparseable" in warns[0]
     assert str(p) in warns[0]
+
+
+# ---------------------------------------------------------------- Task 3
+
+LEDGER_OK = (0, "13 total, 11 active, 2 removed (13 matching filters)")
+
+
+def _stub_preset(tmp_path):
+    """Fixture preset carrying the contract attrs; never a real path."""
+    return types.SimpleNamespace(
+        DATA_DIR=str(tmp_path / "Data"),
+        PLUGINS_TXT=str(tmp_path / "Plugins.txt"),
+        PROCESS_NAMES=["SkyrimSE.exe"],
+        RUNTIME="1.6.1170",
+        STAGING_ROOT=str(tmp_path / "staging"),
+        BACKUPS_DIR=str(tmp_path / "manual" / "backups"),
+    )
+
+
+def _patch_core(monkeypatch, plugins=("*USSEP.esp", "Precision.esp"), ledger=LEDGER_OK):
+    monkeypatch.setattr(snapshot.pluginstxt, "read", lambda preset: list(plugins))
+    monkeypatch.setattr(snapshot.ledger_bridge, "run", lambda args: ledger)
+
+
+def test_capture_plugins_list_hash_counts(tmp_path, monkeypatch):
+    _patch_core(monkeypatch)
+    sec, warns = snapshot.capture_plugins(_stub_preset(tmp_path))
+    assert sec["lines"] == ["*USSEP.esp", "Precision.esp"]
+    assert sec["enabled"] == 1 and sec["total"] == 2
+    assert sec["sha256"] == snapshot.hashlib.sha256(
+        b"*USSEP.esp\nPrecision.esp\n").hexdigest()
+    assert warns == []
+
+
+def test_capture_plugins_hash_stable_and_blankline_free(tmp_path, monkeypatch):
+    _patch_core(monkeypatch, plugins=("*A.esp", "", "  ", "*B.esp"))
+    sec, _ = snapshot.capture_plugins(_stub_preset(tmp_path))
+    assert sec["lines"] == ["*A.esp", "*B.esp"]
+    _patch_core(monkeypatch, plugins=("*A.esp", "*B.esp"))
+    sec2, _ = snapshot.capture_plugins(_stub_preset(tmp_path))
+    assert sec["sha256"] == sec2["sha256"]
+
+
+def test_capture_plugins_skipped_when_no_plugins_txt(tmp_path):
+    preset = _stub_preset(tmp_path)
+    preset.PLUGINS_TXT = None  # CP77: no Plugins.txt
+    assert snapshot.capture_plugins(preset) == (None, [])
+
+
+def test_capture_dlls_sorted_toplevel(tmp_path):
+    d = tmp_path / "SKSE" / "Plugins"
+    (d / "sub").mkdir(parents=True)
+    (d / "b.dll").write_bytes(b"x")
+    (d / "A.dll").write_bytes(b"x")
+    (d / "note.txt").write_bytes(b"x")
+    (d / "sub" / "nested.dll").write_bytes(b"x")  # top-level only
+    sec, warns = snapshot.capture_dlls({"dllDir": str(d)})
+    assert sec["dlls"] == ["A.dll", "b.dll"]
+    assert warns == []
+
+
+def test_capture_dlls_missing_dir_warns_and_unconfigured_skips(tmp_path):
+    sec, warns = snapshot.capture_dlls({"dllDir": str(tmp_path / "gone")})
+    assert sec["dlls"] is None and len(warns) == 1
+    assert snapshot.capture_dlls({}) == (None, [])
+
+
+def test_capture_ini_values_and_missing_file_warns(tmp_path):
+    ini = tmp_path / "Skyrim.ini"
+    ini.write_text("[Display]\niTexMipMapSkip=1\n")
+    cfg = {"ini": [
+        {"file": str(ini), "section": "Display", "key": "iTexMipMapSkip"},
+        {"file": str(tmp_path / "gone.ini"), "section": "X", "key": "y"},
+    ]}
+    sec, warns = snapshot.capture_ini(cfg)
+    assert sec["Skyrim.ini::Display::iTexMipMapSkip"] == "1"
+    assert sec["gone.ini::X::y"] is None
+    assert len(warns) == 1 and "gone.ini" in warns[0]
+    assert snapshot.capture_ini({}) == (None, [])
+
+
+def test_capture_enb_keys(tmp_path):
+    enb = tmp_path / "enbseries.ini"
+    enb.write_text("[COMPLEXPARTICLELIGHTS]\nEnableShadow=true\n")
+    cfg = {"enb": {"file": str(enb), "keys": [
+        {"section": "COMPLEXPARTICLELIGHTS", "key": "EnableShadow"},
+        {"section": "EFFECT", "key": "EnableComplexParticleLights"},
+    ]}}
+    sec, warns = snapshot.capture_enb(cfg)
+    assert sec["keys"]["COMPLEXPARTICLELIGHTS::EnableShadow"] == "true"
+    assert sec["keys"]["EFFECT::EnableComplexParticleLights"] is None
+    assert warns == []
+    assert snapshot.capture_enb({}) == (None, [])
+
+
+def test_capture_enb_missing_file_degrades_gracefully(tmp_path):
+    cfg = {"enb": {"file": str(tmp_path / "gone-enbseries.ini"), "keys": [
+        {"section": "EFFECT", "key": "EnableComplexParticleLights"},
+    ]}}
+    sec, warns = snapshot.capture_enb(cfg)
+    assert sec["keys"]["EFFECT::EnableComplexParticleLights"] is None
+    assert len(warns) == 1 and "not found" in warns[0]
+
+
+def test_capture_ledger_parses_counts(monkeypatch):
+    calls = []
+    monkeypatch.setattr(snapshot.ledger_bridge, "run",
+                        lambda args: calls.append(args) or LEDGER_OK)
+    sec, warns = snapshot.capture_ledger("skyrim")
+    assert sec == {"total": 13, "active": 11, "removed": 2}
+    assert warns == []
+    assert calls == [["list", "--game", "skyrim", "--count"]]
+
+
+def test_capture_ledger_failure_warns(monkeypatch):
+    monkeypatch.setattr(snapshot.ledger_bridge, "run",
+                        lambda args: (1, "ERROR: ledger not found"))
+    sec, warns = snapshot.capture_ledger("skyrim")
+    assert sec is None and len(warns) == 1 and "rc=1" in warns[0]
+
+
+def test_capture_assembles_sections_and_thin_config(tmp_path, monkeypatch):
+    _patch_core(monkeypatch)
+    preset = _stub_preset(tmp_path)
+    snap = snapshot.capture("skyrim", preset, {})
+    assert snap["schemaVersion"] == 1 and snap["game"] == "skyrim"
+    assert snap["sections"]["plugins"]["total"] == 2
+    assert snap["sections"]["ledger"] == {"total": 13, "active": 11, "removed": 2}
+    # thin config: unconfigured sections are None, no phantom warnings
+    for name in ("dlls", "ini", "enb", "steam"):
+        assert snap["sections"][name] is None
+    assert snap["warnings"] == []
+    assert snapshot.manual_dir(preset) == Path(preset.BACKUPS_DIR).parent
+    assert snapshot.snapshot_cfg({"snapshot": {"skyrim": {"dllDir": "d"}}},
+                                 "skyrim") == {"dllDir": "d"}
+    assert snapshot.snapshot_cfg({}, "cp77") == {}

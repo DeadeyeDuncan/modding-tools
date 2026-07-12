@@ -220,3 +220,123 @@ def capture_steam(snap_cfg):
             f"the loader chain (RDR2 near-miss 2026-07-01). "
             f"Fix in Steam > Properties > Updates.")
     return section, warnings
+
+
+# --------------------------------------------------------------------------
+# Section captures (all pure reads)
+# --------------------------------------------------------------------------
+
+def snapshot_cfg(cfg, game):
+    """The per-game 'snapshot' section of modkit.json ({} when absent)."""
+    return (cfg.get("snapshot") or {}).get(game) or {}
+
+
+def manual_dir(preset):
+    """C:\\Modding\\<game>-manual, derived from the preset's BACKUPS_DIR
+    (skyrim-manual\\backups -> skyrim-manual). Keeps this plan inside the
+    dependency contract instead of inventing a new preset attribute."""
+    return Path(preset.BACKUPS_DIR).parent
+
+
+def capture_plugins(preset):
+    """Plugins.txt state: verbatim non-blank lines + normalized SHA256 + counts.
+
+    pluginstxt.read() is BOM/CRLF-safe (core contract); dropping blank lines
+    and hashing '\\n'.join(lines)+'\\n' makes the hash stable across editors,
+    trailing newlines, and CRLF re-saves (normalized-before-hash constraint).
+    Returns (None, []) when the preset has no Plugins.txt (CP77).
+    """
+    if getattr(preset, "PLUGINS_TXT", None) is None:
+        return None, []
+    lines = [ln for ln in pluginstxt.read(preset) if ln.strip()]
+    joined = "\n".join(lines) + "\n"
+    return {
+        "lines": lines,
+        "sha256": hashlib.sha256(joined.encode("utf-8")).hexdigest(),
+        "enabled": sum(1 for ln in lines if ln.startswith("*")),
+        "total": len(lines),
+    }, []
+
+
+def capture_dlls(snap_cfg):
+    """Top-level *.dll filenames in the configured dllDir (SKSE plugins for
+    skyrim). Non-recursive, matching the sse-baseline counting convention."""
+    d = snap_cfg.get("dllDir")
+    if not d:
+        return None, []
+    p = Path(d)
+    if not p.is_dir():
+        return {"dir": str(d), "dlls": None}, [f"dllDir not found: {d}"]
+    return {"dir": str(d), "dlls": sorted(f.name for f in p.glob("*.dll"))}, []
+
+
+def capture_ini(snap_cfg):
+    """Watched INI keys -> {'basename::section::key': value-or-None}.
+
+    Key list comes from modkit.json - the code reads whatever is configured.
+    Basenames (not full paths) keep snapshot keys drive-letter-portable;
+    watched files must therefore have distinct basenames.
+    """
+    entries = snap_cfg.get("ini")
+    if not entries:
+        return None, []
+    out, warnings = {}, []
+    for e in entries:
+        label = f"{Path(e['file']).name}::{e['section']}::{e['key']}"
+        if not Path(e["file"]).is_file():
+            out[label] = None
+            warnings.append(f"ini file not found: {e['file']}")
+            continue
+        out[label] = read_ini_key(e["file"], e["section"], e["key"])
+    return out, warnings
+
+
+def capture_enb(snap_cfg):
+    """Watched ENB flags from the configured enbseries.ini."""
+    enb = snap_cfg.get("enb")
+    if not enb:
+        return None, []
+    path = enb["file"]
+    warnings = [] if Path(path).is_file() else [f"ENB config not found: {path}"]
+    keys = {}
+    for e in enb.get("keys", []):
+        keys[f"{e['section']}::{e['key']}"] = read_ini_key(path, e["section"], e["key"])
+    return {"file": str(path), "keys": keys}, warnings
+
+
+_LEDGER_COUNT_RE = re.compile(r"(\d+) total, (\d+) active, (\d+) removed")
+
+
+def capture_ledger(game):
+    """Entry counts via `ledger.py list --game <g> --count` through the
+    core ledger_bridge (never reads ledger.json directly)."""
+    rc, stdout = ledger_bridge.run(["list", "--game", game, "--count"])
+    m = _LEDGER_COUNT_RE.search(stdout or "")
+    if rc != 0 or not m:
+        return None, [f"ledger count unavailable (rc={rc}): "
+                      f"{(stdout or '').strip()[:200]}"]
+    return {"total": int(m.group(1)), "active": int(m.group(2)),
+            "removed": int(m.group(3))}, []
+
+
+def capture(game, preset, snap_cfg, now=None):
+    """Capture the full live session-state snapshot dict (pure reads)."""
+    now = now or datetime.datetime.now()
+    sections, warnings = {}, []
+    for name, (sec, w) in {
+        "plugins": capture_plugins(preset),
+        "dlls": capture_dlls(snap_cfg),
+        "ini": capture_ini(snap_cfg),
+        "enb": capture_enb(snap_cfg),
+        "ledger": capture_ledger(game),
+        "steam": capture_steam(snap_cfg),
+    }.items():
+        sections[name] = sec
+        warnings.extend(w)
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "game": game,
+        "takenAt": now.strftime("%Y-%m-%dT%H:%M:%S"),
+        "sections": sections,
+        "warnings": warnings,
+    }
