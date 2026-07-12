@@ -1,0 +1,34 @@
+{
+    "sevenzip": "C:\\Program Files\\7-Zip\\7z.exe",
+    "downloads": ["C:\\Users\\auand\\Downloads"],
+    "staging_root": "C:\\Modding\\staging",
+    "games": {
+        "skyrim": {
+            "data_dir": "E:\\SteamLibrary\\steamapps\\common\\Skyrim Special Edition\\Data",
+            "plugins_txt": "C:\\Users\\auand\\AppData\\Local\\Skyrim Special Edition\\Plugins.txt",
+            "process_names": ["SkyrimSE.exe", "skse64_loader.exe"],
+            "runtime": "1.6.1170",
+            "backups_dir": "C:\\Modding\\skyrim-manual\\backups",
+            "manifests_dir": "C:\\Modding\\skyrim-manual\\manifests",
+            "vortex_downloads": "C:\\Users\\auand\\AppData\\Roaming\\Vortex\\downloads\\skyrimse"
+        },
+        "cp77": {
+            "data_dir": "E:\\SteamLibrary\\steamapps\\common\\Cyberpunk 2077",
+            "plugins_txt": null,
+            "process_names": ["Cyberpunk2077.exe"],
+            "runtime": null,
+            "backups_dir": "C:\\Modding\\cyberpunk-manual\\backups",
+            "manifests_dir": "C:\\Modding\\cyberpunk-manual\\manifests",
+            "vortex_downloads": "C:\\Users\\auand\\AppData\\Roaming\\Vortex\\downloads\\cyberpunk2077"
+        },
+        "kenshi": {
+            "data_dir": null,
+            "plugins_txt": null,
+            "process_names": ["kenshi_x64.exe"],
+            "runtime": null,
+            "backups_dir": "C:\\Modding\\kenshi-manual\\backups",
+            "manifests_dir": null,
+            "vortex_downloads": null
+        }
+    }
+}
