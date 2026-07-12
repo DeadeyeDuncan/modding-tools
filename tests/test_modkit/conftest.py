@@ -75,3 +75,29 @@ def run_cli(capsys):
         code = cli.main(list(argv))
         return code, capsys.readouterr().out
     return _run
+
+
+@pytest.fixture
+def make_staging(preset):
+    from modkit import state as mstate
+
+    def _make(files, mod="Test Mod", applicable=None, nexus_id=77, version="1.0"):
+        root = Path(preset.STAGING_ROOT)
+        root.mkdir(parents=True, exist_ok=True)
+        sd = root / f"20260711-000000-{mstate.slug(mod)}"
+        sd.mkdir()
+        pay = sd / "payload"
+        pay.mkdir()
+        for rel, content in files.items():
+            f = pay / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(content if isinstance(content, bytes) else content.encode())
+        st = mstate.InstallState.create(
+            str(sd), mod=mod, game="skyrim", archive=r"C:\dl\x-77-1-0.7z",
+            nexus_id=nexus_id, version=version,
+            applicable=applicable if applicable is not None
+            else preset.applicability(str(pay)))
+        st.stamp("intake")
+        st.stamp("staged")
+        return sd
+    return _make

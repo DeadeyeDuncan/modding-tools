@@ -204,6 +204,53 @@ def register_fomod(sub, common):
     sp.set_defaults(func=cmd_fomod)
 
 
+def cmd_esp(args):
+    from modkit import state, tes4
+    preset = _preset(args)
+    staging = _staging_for(args, preset)
+    st = state.InstallState.load(str(staging))
+    pay = state.payload_root(staging)
+    exts = getattr(preset, "PLUGIN_EXTS", ()) or (".esp", ".esm", ".esl")
+    plugins = sorted(p for p in pay.rglob("*") if p.suffix.lower() in exts)
+    if not plugins:
+        safe_print("no plugins in payload - nothing to vet")
+        st.stamp("esp")
+        return 0
+    data_dir = Path(preset.DATA_DIR) if preset.DATA_DIR else None
+    payload_names = {p.name.lower() for p in plugins}
+    results, warned = {}, False
+    for p in plugins:
+        try:
+            hdr = tes4.parse_header(p)
+        except tes4.Tes4Error as ex:
+            safe_print(f"WARN {p.name}: {ex}")
+            results[p.name] = {"error": str(ex)}
+            warned = True
+            continue
+        missing = [m for m in hdr["masters"]
+                   if m.lower() not in payload_names
+                   and not (data_dir and (data_dir / m).is_file())]
+        tag = " [ESL]" if hdr["esl"] else ""
+        safe_print(f"{p.name}{tag}: masters = {', '.join(hdr['masters']) or '(none)'}")
+        for m in missing:
+            safe_print(f"  WARN missing master: {m} (not in Data or payload) - "
+                       "install it first or expect a CTD")
+            warned = True
+        results[p.name] = {"masters": hdr["masters"], "esl": hdr["esl"],
+                           "missing": missing}
+    st.data["vet_results"]["esp"] = results
+    st.stamp("esp")
+    return 2 if warned else 0
+
+
+def register_esp(sub, common):
+    sp = sub.add_parser("esp", parents=[common],
+                        help="TES4 header vet: masters list, ESL flag, "
+                             "missing-master check vs Data + payload")
+    sp.add_argument("--staging", default=None, help="staging dir (default: latest)")
+    sp.set_defaults(func=cmd_esp)
+
+
 def _preset(args):
     cfg = config.load(getattr(args, "config", None))
     game = getattr(args, "game", None)
@@ -237,6 +284,7 @@ def _register_all(sub, common):
     register_intake(sub, common)
     register_stage(sub, common)
     register_fomod(sub, common)
+    register_esp(sub, common)
 
 
 def main(argv=None):
