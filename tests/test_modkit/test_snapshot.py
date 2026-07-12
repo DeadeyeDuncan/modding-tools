@@ -301,3 +301,32 @@ def test_capture_assembles_sections_and_thin_config(tmp_path, monkeypatch):
     assert snapshot.snapshot_cfg({"snapshot": {"skyrim": {"dllDir": "d"}}},
                                  "skyrim") == {"dllDir": "d"}
     assert snapshot.snapshot_cfg({}, "cp77") == {}
+
+
+# ---------------------------------------------------------------- Task 4
+
+def test_take_writes_snapshot_json(tmp_path, monkeypatch):
+    _patch_core(monkeypatch, plugins=("*A.esp",))
+    preset = _stub_preset(tmp_path)
+    path, snap = snapshot.take("skyrim", preset, {}, stamp="20260711-120000")
+    assert path == (Path(preset.BACKUPS_DIR).parent / "snapshots"
+                    / "snapshot-20260711-120000.json")
+    on_disk = snapshot.load_snapshot(path)
+    assert on_disk["game"] == "skyrim"
+    assert on_disk["sections"]["plugins"]["enabled"] == 1
+    assert on_disk == json.loads(json.dumps(snap))  # round-trip identical
+
+
+def test_snapshots_dir_derived_from_backups_dir(tmp_path):
+    preset = _stub_preset(tmp_path)
+    assert snapshot.snapshots_dir(preset) == tmp_path / "manual" / "snapshots"
+
+
+def test_latest_snapshot_picks_newest_and_none(tmp_path):
+    d = tmp_path / "snapshots"
+    d.mkdir()
+    (d / "snapshot-20260701-090000.json").write_text("{}")
+    (d / "snapshot-20260711-090000.json").write_text("{}")
+    (d / "unrelated.txt").write_text("x")
+    assert snapshot.latest_snapshot(d).name == "snapshot-20260711-090000.json"
+    assert snapshot.latest_snapshot(tmp_path / "empty") is None

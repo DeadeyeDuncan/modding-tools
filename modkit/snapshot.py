@@ -340,3 +340,35 @@ def capture(game, preset, snap_cfg, now=None):
         "sections": sections,
         "warnings": warnings,
     }
+
+
+# --------------------------------------------------------------------------
+# snapshot take
+# --------------------------------------------------------------------------
+
+def snapshots_dir(preset):
+    return manual_dir(preset) / "snapshots"
+
+
+def take(game, preset, snap_cfg, stamp=None):
+    """Capture live state and write snapshot-<ts>.json atomically.
+
+    Returns (path, snapshot_dict). Writes ONLY under
+    C:\\Modding\\<game>-manual\\snapshots\\ - game dirs are read, never written.
+    """
+    snap = capture(game, preset, snap_cfg)
+    stamp = stamp or datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    out = snapshots_dir(preset) / f"snapshot-{stamp}.json"
+    atomic_write(out, json.dumps(snap, indent=2, ensure_ascii=False) + "\n")
+    return out, snap
+
+
+def latest_snapshot(snapdir):
+    """Newest snapshot file by name (stamp format sorts lexicographically)."""
+    files = sorted(Path(snapdir).glob("snapshot-*.json"))
+    return files[-1] if files else None
+
+
+def load_snapshot(path):
+    """Parse a snapshot file (BOM-tolerant). Raises on missing/corrupt."""
+    return json.loads(Path(path).read_bytes().decode("utf-8-sig"))
