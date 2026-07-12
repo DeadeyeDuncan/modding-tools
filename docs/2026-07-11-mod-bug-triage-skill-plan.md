@@ -370,3 +370,21 @@ Expected: clean commit.
 **If Inline Execution chosen:**
 - **REQUIRED SUB-SKILL:** Use superpowers:executing-plans
 - Batch execution with checkpoints for review
+
+## Dry-Run Results (appended at execution) — 2026-07-11
+
+Method: fresh subagent per scenario (general-purpose), given ONLY the SKILL.md text + the scenario paragraph, asked "what is your first move?". 3/3 PASS.
+
+- **Scenario A (invisible geometry / Embershard hole post parallax-revert):** PASS. First move: pull the change record (ledger tail) + read triage.md, explicitly refused any relaunch/toggle/mod-hypothesis, and named `sse-over-revert-invisible-holes.md` as the precedent to scan. No FAIL condition (no mod hypothesis, no toggle, no relaunch) triggered. Note: routed via rule-1 ledger-first rather than leading with the First-Move-Table "Invisible object" MIC/loose-vs-BSA row — acceptable (change is pre-stated, ledger confirms exactly what the revert touched, then feeds the loose-vs-BSA check), no wording change made.
+- **Scenario B (crosshair FPS drop):** PASS. First move: ledger tail (--since a-few-days-ago) + scan the named memory precedent `sse-morehud-crosshair-fps.md` before any uninstall; no bundled removals. Matches expected routing exactly.
+- **Scenario C (hard freeze, 2nd force-kill, no crash log):** PASS. First move: require a reboot before any diagnosis/toggle/conclusion — cited both rule 8 (2+ force-kill gate) and the First-Move-Table hard-freeze row. Matches expected routing exactly.
+
+Protocol-coverage checklist (against final SKILL.md, 52 counted lines / ≤150):
+- [x] All 8 rules present as numbered ### N. sections
+- [x] `ledger.py list` with `<skyrim|cp77>` constraint (rule 1)
+- [x] MIC + BOS/SKSE-crash/Papyrus/console named (rule 2)
+- [x] 2-failed-launch hard cap = STOP + revert + no third hypothesis (rule 4)
+- [x] No placeholder text
+- [x] Line count ≤ 150
+
+No SKILL.md fixes required (0 FAIL). SKILL.md unchanged since authoring — the docs/skills copy in Task 3 is current.
