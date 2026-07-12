@@ -892,17 +892,21 @@ def enabled_plugins(lines):
 
 # ------------------------------------------------------------ TES4 masters
 # modkit.tes4.parse_header() exists on master and is the reviewed-correct
-# general-purpose TES4 header parser -- reused wherever possible. It does
-# NOT special-case an XXXX subrecord (a size-override marker that promotes
-# the *next* subrecord's declared size from 16-bit to a 32-bit payload).
-# Real DynDOLOD.esm headers carry an oversized ONAM array preceded by
-# exactly this XXXX marker (wiki's 5th-regen lesson); parse_header's plain
+# general-purpose TES4 header parser -- but it does NOT special-case an
+# XXXX subrecord (a size-override marker that promotes the *next*
+# subrecord's declared size from 16-bit to a 32-bit payload). Real
+# DynDOLOD.esm headers carry an oversized ONAM array preceded by exactly
+# this XXXX marker (wiki's 5th-regen lesson); parse_header's plain
 # sig+u16size walk would desync at that ONAM and read garbage as subrecord
 # headers for the remainder of the record, silently losing any MAST that
-# follows. read_masters() below is a lodregen-local walk purely so it can
-# add that one piece of oversize-aware logic; everything else (header
-# layout, MAST extraction, cp1252 decode) mirrors modkit.tes4 on purpose.
-# If modkit.tes4 ever grows XXXX support this can delegate to it instead.
+# follows. read_masters() below is a lodregen-local walk -- it does NOT
+# call modkit.tes4 -- so it can add that one piece of oversize-aware
+# logic; it deliberately copies modkit.tes4's two safety habits: the walk
+# is bounded to the record's own body (body = data[24:24+dataSize], never
+# the raw file buffer beyond the record), and MAST bytes decode with
+# cp1252 errors="replace" so a corrupt/oddly-encoded master name degrades
+# to a best-effort string instead of raising past main(). If modkit.tes4
+# ever grows XXXX support this can delegate to it instead.
 
 IMPLICIT_MASTERS = {"skyrim.esm", "update.esm", "dawnguard.esm",
                     "hearthfires.esm", "dragonborn.esm"}
@@ -914,24 +918,32 @@ def read_masters(plugin_path):
     Header layout (SSE): sig(4) dataSize(4) flags(4) formID(4) vc(4)
     version(2) unknown(2) = 24 bytes, then subrecords sig(4)+size(2)+data.
     An XXXX subrecord promotes the NEXT subrecord's size to its uint32
-    payload (DynDOLOD.esm headers carry huge ONAM arrays)."""
+    payload (DynDOLOD.esm headers carry huge ONAM arrays). The walk is
+    bounded to the record body (mirroring modkit.tes4) so a corrupt or
+    lying size field can't read past the available buffer; a truncated
+    XXXX oversize marker raises a clean LodregenError instead of a raw
+    struct.error."""
     data = Path(plugin_path).read_bytes()
     if len(data) < 24 or data[:4] != b"TES4":
         raise ValueError(f"not a TES4 plugin: {plugin_path}")
     data_size = struct.unpack_from("<I", data, 4)[0]
-    end = min(24 + data_size, len(data))
-    masters, off, oversize = [], 24, None
-    while off + 6 <= end:
-        sig = data[off:off + 4]
-        size = struct.unpack_from("<H", data, off + 4)[0]
+    body = data[24:24 + data_size]
+    masters, off, oversize = [], 0, None
+    while off + 6 <= len(body):
+        sig = body[off:off + 4]
+        size = struct.unpack_from("<H", body, off + 4)[0]
         off += 6
         if oversize is not None:
             size, oversize = oversize, None
         if sig == b"XXXX" and size == 4:
-            oversize = struct.unpack_from("<I", data, off)[0]
+            if off + 4 > len(body):
+                raise LodregenError(
+                    f"{plugin_path}: truncated XXXX oversize marker in "
+                    f"TES4 header")
+            oversize = struct.unpack_from("<I", body, off)[0]
         elif sig == b"MAST":
-            masters.append(data[off:off + size].rstrip(b"\x00")
-                           .decode("cp1252"))
+            masters.append(body[off:off + size].rstrip(b"\x00")
+                           .decode("cp1252", "replace"))
         off += size
     return masters
 

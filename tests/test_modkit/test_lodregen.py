@@ -639,6 +639,36 @@ def test_read_masters_handles_xxxx_oversize(tmp_path):
     assert lodregen.read_masters(p) == ["Skyrim.esm"]
 
 
+def test_read_masters_replaces_bad_cp1252_byte(tmp_path):
+    # 0x81 is undefined in cp1252. A master filename carrying it (mangled
+    # by a bad re-encode somewhere upstream) must decode with the U+FFFD
+    # replacement char, not raise UnicodeDecodeError past main().
+    name = b"Bad\x81Master.esp\x00"
+    subs = (b"HEDR" + struct.pack("<H", 12) + struct.pack("<fII", 1.71, 0, 0)
+            + b"MAST" + struct.pack("<H", len(name)) + name
+            + b"DATA" + struct.pack("<H", 8) + b"\x00" * 8)
+    p = tmp_path / "bad-encoding.esp"
+    p.write_bytes(b"TES4" + struct.pack("<IIII", len(subs), 0, 0, 0)
+                  + struct.pack("<HH", 44, 0) + subs)
+    masters = lodregen.read_masters(p)
+    assert len(masters) == 1
+    assert masters[0].startswith("Bad") and masters[0].endswith("Master.esp")
+    assert "�" in masters[0]
+
+
+def test_read_masters_handles_truncated_xxxx_cleanly(tmp_path):
+    # A record truncated mid-XXXX (header present, 4-byte oversize payload
+    # missing) must not blow up with a raw struct.error -- it should raise
+    # a clean LodregenError that main() already catches.
+    subs = (b"HEDR" + struct.pack("<H", 12) + struct.pack("<fII", 1.71, 0, 0)
+            + b"XXXX" + struct.pack("<H", 4))  # no oversize payload follows
+    p = tmp_path / "truncated.esm"
+    p.write_bytes(b"TES4" + struct.pack("<IIII", len(subs), 1, 0, 0)
+                  + struct.pack("<HH", 44, 0) + subs)
+    with pytest.raises(lodregen.LodregenError):
+        lodregen.read_masters(p)
+
+
 def test_master_problems_classifies(tmp_path):
     data = tmp_path / "Data"
     data.mkdir()
