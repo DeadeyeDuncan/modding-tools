@@ -330,3 +330,109 @@ def test_latest_snapshot_picks_newest_and_none(tmp_path):
     (d / "unrelated.txt").write_text("x")
     assert snapshot.latest_snapshot(d).name == "snapshot-20260711-090000.json"
     assert snapshot.latest_snapshot(tmp_path / "empty") is None
+
+
+# ---------------------------------------------------------------- Task 5
+
+def _snap(plugins=None, dlls=None, ini=None, enb=None, ledger=None, steam=None,
+          warnings=()):
+    """Hand-build a snapshot dict in the exact capture() shape."""
+    return {"schemaVersion": 1, "game": "skyrim", "takenAt": "2026-07-11T12:00:00",
+            "sections": {"plugins": plugins, "dlls": dlls, "ini": ini,
+                         "enb": enb, "ledger": ledger, "steam": steam},
+            "warnings": list(warnings)}
+
+
+def _plug(*lines):
+    joined = "\n".join(lines) + "\n"
+    import hashlib as h
+    return {"lines": list(lines),
+            "sha256": h.sha256(joined.encode("utf-8")).hexdigest(),
+            "enabled": sum(1 for x in lines if x.startswith("*")),
+            "total": len(lines)}
+
+
+def test_diff_identical_no_drift():
+    a = _snap(plugins=_plug("*A.esp"))
+    text, deltas, warns = snapshot.diff_report(a, a)
+    assert deltas == 0 and warns == 0
+    assert "no drift" in text
+    assert "ASK THE USER" not in text
+
+
+def test_diff_plugin_added_removed():
+    base = _snap(plugins=_plug("*A.esp", "*B.esp"))
+    live = _snap(plugins=_plug("*A.esp", "*C.esp"))
+    text, deltas, _ = snapshot.diff_report(base, live)
+    assert deltas == 2
+    assert "ADDED:   *C.esp" in text
+    assert "REMOVED: *B.esp" in text
+
+
+def test_diff_plugin_enable_flip():
+    base = _snap(plugins=_plug("*Precision.esp"))
+    live = _snap(plugins=_plug("Precision.esp"))
+    text, deltas, _ = snapshot.diff_report(base, live)
+    assert deltas == 1
+    assert "CHANGED: Precision.esp: enabled -> DISABLED" in text
+
+
+def test_diff_hash_only_change():
+    base = _snap(plugins=_plug("*A.esp", "*B.esp"))
+    live = _snap(plugins=_plug("*B.esp", "*A.esp"))
+    text, deltas, _ = snapshot.diff_report(base, live)
+    assert deltas == 1
+    assert "same plugin set, different order/content" in text
+
+
+def test_diff_dll_added():
+    base = _snap(dlls={"dir": "d", "dlls": ["a.dll"]})
+    live = _snap(dlls={"dir": "d", "dlls": ["a.dll", "OutfitDistributor.dll"]})
+    text, deltas, _ = snapshot.diff_report(base, live)
+    assert deltas == 1
+    assert "ADDED:   OutfitDistributor.dll" in text
+
+
+def test_diff_kv_ini_enb_changed():
+    base = _snap(ini={"Skyrim.ini::Display::iTexMipMapSkip": "1"},
+                 enb={"file": "e", "keys": {"EFFECT::X": "true"}})
+    live = _snap(ini={"Skyrim.ini::Display::iTexMipMapSkip": None},
+                 enb={"file": "e", "keys": {"EFFECT::X": "false"}})
+    text, deltas, _ = snapshot.diff_report(base, live)
+    assert deltas == 2
+    assert "CHANGED: Skyrim.ini::Display::iTexMipMapSkip: '1' -> None" in text
+    assert "CHANGED: EFFECT::X: 'true' -> 'false'" in text
+
+
+def test_diff_ledger_and_steam_changed_and_warnings_surface():
+    base = _snap(ledger={"total": 10, "active": 9, "removed": 1},
+                 steam={"appmanifest": "p", "appId": "489830",
+                        "autoUpdateBehavior": "1"})
+    live = _snap(ledger={"total": 11, "active": 10, "removed": 1},
+                 steam={"appmanifest": "p", "appId": "489830",
+                        "autoUpdateBehavior": "0"},
+                 warnings=["Steam AutoUpdateBehavior='0' ..."])
+    text, deltas, warns = snapshot.diff_report(base, live)
+    assert deltas == 2 and warns == 1
+    assert "total 10 -> 11" in text
+    assert "AutoUpdateBehavior '1' -> '0'" in text
+    assert "WARNINGS (live state)" in text
+
+
+def test_diff_ask_user_note_only_when_deltas():
+    base = _snap(plugins=_plug("*A.esp"))
+    live = _snap(plugins=_plug("A.esp"))
+    text, deltas, _ = snapshot.diff_report(base, live)
+    assert deltas == 1
+    assert "ASK THE USER" in text and "Precision.esp" in text
+    # warnings alone do not trigger the deltas note
+    warntext, d2, w2 = snapshot.diff_report(base, _snap(plugins=_plug("*A.esp"),
+                                                        warnings=["w"]))
+    assert d2 == 0 and w2 == 1 and "ASK THE USER" not in warntext
+
+
+def test_diff_section_presence_change_reported():
+    base = _snap()
+    live = _snap(dlls={"dir": "d", "dlls": ["a.dll"]})
+    text, deltas, _ = snapshot.diff_report(base, live)
+    assert deltas == 1 and "appeared (newly configured)" in text

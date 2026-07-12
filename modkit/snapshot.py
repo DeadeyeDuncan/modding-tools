@@ -372,3 +372,151 @@ def latest_snapshot(snapdir):
 def load_snapshot(path):
     """Parse a snapshot file (BOM-tolerant). Raises on missing/corrupt."""
     return json.loads(Path(path).read_bytes().decode("utf-8-sig"))
+
+
+# --------------------------------------------------------------------------
+# snapshot diff
+# --------------------------------------------------------------------------
+
+ASK_THE_USER = """\
+------------------------------------------------------------
+NOTE FOR CLAUDE - read before acting on this report:
+Unexplained deltas are NOT automatically bugs. The user changes things
+between sessions deliberately (2026-07-01: Precision.esp was disabled by
+choice, and a session-start audit wrongly flagged it as an urgent bug).
+Before treating any delta above as a defect - and before "fixing" anything -
+ASK THE USER: "What did you change manually since the last snapshot?"
+Only act on a delta after the user confirms it was not deliberate."""
+
+
+def _plugin_map(sec):
+    """plugins section -> {lowercased name: (enabled, display_name)}."""
+    out = {}
+    for ln in sec.get("lines") or []:
+        display = ln.lstrip("*").strip()
+        out[display.lower()] = (ln.startswith("*"), display)
+    return out
+
+
+def _diff_kv(bd, ld):
+    """Diff two flat {key: value} dicts -> report lines (sorted by key)."""
+    lines = []
+    for k in sorted(set(bd) | set(ld)):
+        if k not in bd:
+            lines.append(f"  ADDED:   {k} = {ld[k]!r}")
+        elif k not in ld:
+            lines.append(f"  REMOVED: {k} (was {bd[k]!r})")
+        elif bd[k] != ld[k]:
+            lines.append(f"  CHANGED: {k}: {bd[k]!r} -> {ld[k]!r}")
+    return lines
+
+
+def diff_report(base, live):
+    """Stored snapshot vs live capture -> (text, delta_count, warning_count).
+
+    Deltas are grouped ADDED / REMOVED / CHANGED per section. Whenever any
+    delta exists the report ends with the ASK_THE_USER note - deliberate
+    user changes must never be treated as bugs (reflection-notes.md #9).
+    """
+    out = []
+    deltas = 0
+    bsec = base.get("sections") or {}
+    lsec = live.get("sections") or {}
+
+    def presence_changed(heading, b, l):
+        nonlocal deltas
+        if (b is None) != (l is None):
+            out.append(heading)
+            out.append("  CHANGED: section "
+                       + ("appeared (newly configured)" if b is None
+                          else "disappeared (config removed?)"))
+            deltas += 1
+            return True
+        return False
+
+    # --- Plugins.txt
+    b, l = bsec.get("plugins"), lsec.get("plugins")
+    if not presence_changed("PLUGINS (Plugins.txt)", b, l) and b is not None:
+        bm, lm = _plugin_map(b), _plugin_map(l)
+        added = sorted(set(lm) - set(bm))
+        removed = sorted(set(bm) - set(lm))
+        flipped = sorted(n for n in set(bm) & set(lm) if bm[n][0] != lm[n][0])
+        hash_only = (b["sha256"] != l["sha256"]) and not (added or removed or flipped)
+        if added or removed or flipped or hash_only:
+            out.append("PLUGINS (Plugins.txt)")
+            for n in added:
+                out.append(f"  ADDED:   {'*' if lm[n][0] else ''}{lm[n][1]}")
+            for n in removed:
+                out.append(f"  REMOVED: {'*' if bm[n][0] else ''}{bm[n][1]}")
+            for n in flipped:
+                state = "disabled -> ENABLED" if lm[n][0] else "enabled -> DISABLED"
+                out.append(f"  CHANGED: {lm[n][1]}: {state}")
+            if hash_only:
+                out.append("  CHANGED: same plugin set, different order/content "
+                           "(sha256 differs)")
+            out.append(f"  enabled {b['enabled']} -> {l['enabled']}, "
+                       f"total {b['total']} -> {l['total']}")
+            deltas += len(added) + len(removed) + len(flipped) + (1 if hash_only else 0)
+
+    # --- watched DLLs
+    b, l = bsec.get("dlls"), lsec.get("dlls")
+    if not presence_changed("DLLS", b, l) and b is not None:
+        bd, ld = set(b.get("dlls") or []), set(l.get("dlls") or [])
+        if bd != ld:
+            out.append(f"DLLS ({l.get('dir')})")
+            for n in sorted(ld - bd):
+                out.append(f"  ADDED:   {n}")
+            for n in sorted(bd - ld):
+                out.append(f"  REMOVED: {n}")
+            deltas += len(bd ^ ld)
+
+    # --- watched INI keys
+    b, l = bsec.get("ini"), lsec.get("ini")
+    if not presence_changed("WATCHED INI KEYS", b, l) and b is not None:
+        kv = _diff_kv(b, l)
+        if kv:
+            out.append("WATCHED INI KEYS")
+            out.extend(kv)
+            deltas += len(kv)
+
+    # --- watched ENB flags
+    b, l = bsec.get("enb"), lsec.get("enb")
+    if not presence_changed("WATCHED ENB FLAGS", b, l) and b is not None:
+        kv = _diff_kv(b.get("keys") or {}, l.get("keys") or {})
+        if kv:
+            out.append(f"WATCHED ENB FLAGS ({l.get('file')})")
+            out.extend(kv)
+            deltas += len(kv)
+
+    # --- ledger counts
+    b, l = bsec.get("ledger"), lsec.get("ledger")
+    if not presence_changed("LEDGER", b, l) and b is not None and b != l:
+        out.append("LEDGER")
+        out.append(f"  CHANGED: total {b['total']} -> {l['total']}, "
+                   f"active {b['active']} -> {l['active']}, "
+                   f"removed {b['removed']} -> {l['removed']}")
+        deltas += 1
+
+    # --- steam auto-update
+    b, l = bsec.get("steam"), lsec.get("steam")
+    if not presence_changed("STEAM", b, l) and b is not None:
+        if b.get("autoUpdateBehavior") != l.get("autoUpdateBehavior"):
+            out.append("STEAM")
+            out.append(f"  CHANGED: AutoUpdateBehavior "
+                       f"{b.get('autoUpdateBehavior')!r} -> "
+                       f"{l.get('autoUpdateBehavior')!r}")
+            deltas += 1
+
+    warnings = list(live.get("warnings") or [])
+    if warnings:
+        out.append("WARNINGS (live state)")
+        out.extend(f"  {w}" for w in warnings)
+
+    if deltas == 0 and not warnings:
+        out.append("no drift - live state matches the snapshot.")
+    else:
+        out.append("")
+        out.append(f"{deltas} delta(s), {len(warnings)} warning(s).")
+        if deltas:
+            out.append(ASK_THE_USER)
+    return "\n".join(out), deltas, len(warnings)
