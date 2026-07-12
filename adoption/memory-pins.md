@@ -1,4 +1,4 @@
-# modkit memory pins - provenance copy; live masters in C:\Users\auand\.claude\projects\<slug>\memory\modkit.md
+# modkit memory pins - provenance copy; live masters in C:\Users\auand\.claude\projects\<slug>\memory\modkit.md / snapshot.md
 
 ## Skyrim
 
@@ -74,6 +74,98 @@ metadata:
 **How to apply:** even without the full preset, NEVER hand-roll 7z extraction - stage through modkit so counts are verified and the staging dir is tracked. Full deploy/verify/remove/real-conflicts support lands when the Kenshi preset is built (data_dir + mods.cfg/.mod-header masters checks); this pin gets updated then.
 ```
 
+## Snapshot — Skyrim
+
+`C:\Users\auand\.claude\projects\E--SteamLibrary-steamapps-common-Skyrim-Special-Edition\memory\snapshot.md`
+
+```markdown
+---
+name: snapshot
+description: session-state snapshots + open-items via modkit — diff & openitems list at session START, take at session END / after installs; unexplained deltas = ASK THE USER, not bugs
+metadata:
+  type: project
+---
+
+Session-state drift and pending fixes are managed by modkit
+(`py -3 C:\Modding\tools\modkit.py <cmd> --game skyrim`):
+
+- **Session START (every modding session):**
+  `py -3 C:\Modding\tools\modkit.py snapshot diff --game skyrim`
+  `py -3 C:\Modding\tools\modkit.py openitems list --game skyrim`
+  Exit 2 from diff = drift or warnings — read the report. **Unexplained deltas
+  are questions for the user ("what did you change manually?"), NOT bugs to
+  fix** (Precision.esp was disabled by choice 2026-07-01 and a session-start
+  audit wrongly flagged it as an urgent bug).
+- **Session END and after every install batch:**
+  `py -3 C:\Modding\tools\modkit.py snapshot take --game skyrim`
+- Any root-caused-but-not-executed fix gets
+  `py -3 C:\Modding\tools\modkit.py openitems add --game skyrim "<item>"`
+  BEFORE the session ends (XPMSE/Bashed-Patch fixes sat unexecuted for weeks
+  when they lived only in prose notes).
+- Snapshots: `C:\Modding\skyrim-manual\snapshots\snapshot-<ts>.json` (plugin
+  list + normalized SHA256 + counts, SKSE DLL list, watched INI keys, watched
+  ENB flags, ledger counts, Steam AutoUpdateBehavior). Open items:
+  `C:\Modding\skyrim-manual\open-items.md` (checkbox markdown; hand-edits are
+  fine — the parser is tolerant).
+- Steam AutoUpdateBehavior must stay **1** ("only update when I launch") —
+  anything else risks an unattended update breaking the SKSE loader chain
+  (RDR2 was 10 hours from exactly that, 2026-07-01). take/diff WARN when it
+  is not 1. **Live 2026-07-12: it is currently 0 ("always keep updated") —
+  fix in Steam > Properties > Updates before the next launch.**
+- Watched INI/ENB key lists live in `C:\Modding\tools\modkit.json` under
+  `snapshot.skyrim` — extend by editing config, not code.
+
+**Why:** stale baselines cost ~30 tool calls per session-start re-audit
+(reflection-notes.md #9). **How:** never hand-write snapshot files; snapshot
+never writes into game dirs (reads only).
+```
+
+## Snapshot — Cyberpunk 2077
+
+`C:\Users\auand\.claude\projects\E--SteamLibrary-steamapps-common-Cyberpunk-2077\memory\snapshot.md`
+
+```markdown
+---
+name: snapshot
+description: session-state snapshots + open-items via modkit — diff & openitems list at session START, take at session END / after installs; unexplained deltas = ASK THE USER, not bugs
+metadata:
+  type: project
+---
+
+Session-state drift and pending fixes are managed by modkit
+(`py -3 C:\Modding\tools\modkit.py <cmd> --game cp77`):
+
+- **Session START (every modding session):**
+  `py -3 C:\Modding\tools\modkit.py snapshot diff --game cp77`
+  `py -3 C:\Modding\tools\modkit.py openitems list --game cp77`
+  Exit 2 from diff = drift or warnings — read the report. **Unexplained deltas
+  are questions for the user ("what did you change manually?"), NOT bugs to
+  fix** (Skyrim lesson 2026-07-01: Precision.esp was disabled by choice and
+  got flagged as an urgent bug).
+- **Session END and after every install batch:**
+  `py -3 C:\Modding\tools\modkit.py snapshot take --game cp77`
+- Any root-caused-but-not-executed fix gets
+  `py -3 C:\Modding\tools\modkit.py openitems add --game cp77 "<item>"`
+  BEFORE the session ends.
+- Snapshots: `C:\Modding\cyberpunk-manual\snapshots\snapshot-<ts>.json`;
+  open items: `C:\Modding\cyberpunk-manual\open-items.md` (checkbox markdown;
+  hand-edits are fine — the parser is tolerant).
+- CP77 is the THIN preset: the snapshot currently captures ledger counts +
+  Steam AutoUpdateBehavior only (no Plugins.txt/SKSE/ENB/INI equivalents
+  configured). Plugin/DLL/INI/ENB watch sections appear automatically if
+  configured later under `snapshot.cp77` in `C:\Modding\tools\modkit.json`
+  (e.g. `dllDir` pointed at `red4ext\plugins`).
+- Steam AutoUpdateBehavior must stay **1** ("only update when I launch") —
+  anything else risks an unattended update breaking the RED4ext loader chain
+  (RDR2 was 10 hours from exactly that, 2026-07-01). take/diff WARN when it
+  is not 1. **Live 2026-07-12: it is currently 0 ("always keep updated") —
+  fix in Steam > Properties > Updates before the next launch.**
+
+**Why:** stale baselines cost ~30 tool calls per session-start re-audit
+(reflection-notes.md #9). **How:** never hand-write snapshot files; snapshot
+never writes into game dirs (reads only).
+```
+
 ## MEMORY.md index lines
 
 Skyrim — `C:\Users\auand\.claude\projects\E--SteamLibrary-steamapps-common-Skyrim-Special-Edition\memory\MEMORY.md`, inserted as the new first list item (above the Ledger CLI line):
@@ -94,6 +186,22 @@ Kenshi — `C:\Users\auand\.claude\projects\E--SteamLibrary-steamapps-common-Ken
 - [modkit install toolkit](modkit.md) — preset NOT built yet: only intake/stage/status work with `--game kenshi` (verified full-extract staging); deploy/remove/verify hard-error, conflicts is a silent no-op (never trust it — use the manual conflict-sweep workflow); NEVER hand-roll 7z extraction
 ```
 
+Skyrim (Task 9, 2026-07-12) — inserted as the new first list item, above the modkit install-toolkit line above:
+
+```markdown
+- [Snapshot + open items](snapshot.md) — session START: `modkit snapshot diff` + `openitems list`; session END/installs: `snapshot take`; unexplained deltas = ASK THE USER, not bugs; Steam AutoUpdateBehavior must stay 1
+```
+
+Cyberpunk 2077 (Task 9, 2026-07-12) — inserted as the new first list item, above the modkit install-toolkit line above:
+
+```markdown
+- [Snapshot + open items](snapshot.md) — session START: `modkit snapshot diff` + `openitems list`; session END/installs: `snapshot take`; unexplained deltas = ASK THE USER, not bugs; Steam AutoUpdateBehavior must stay 1
+```
+
 ## Accuracy corrections vs. task-17-brief.md
 
 The brief's Kenshi pin (both `modkit.md` body and index line) described only "no vets/deploy/verify/remove for Kenshi yet" without detail. Verified against the as-built tool (`modkit/games/__init__.py` reads `data_dir` from `modkit.json`; Kenshi's entry has `"data_dir": null`; `modkit/conflicts.py:sweep()` returns `[]` immediately when `preset.DATA_DIR is None`, so `conflicts --game kenshi` prints `"no file overlaps vs Data"` at exit 0 without ever comparing files) and against `adoption/mod-install-SKILL.md`'s Kenshi section (same finding, already corrected there in commit 930ad99). The pins above were written to match: `deploy`/`remove`/`verify` hard-error at exit 1 (not just "unavailable"), and `conflicts --game kenshi` is called out explicitly as a **silent no-op that must not be trusted** — resolving a real gap between the brief and the shipped behavior before it could propagate into session-start recall.
+
+## Task 9 addition (2026-07-12): real snapshot config + memory pins
+
+`task-9-brief.md` did not explicitly ask for a provenance copy of the snapshot pins in this file — only the two live `~/.claude/projects/.../memory/snapshot.md` files + their `MEMORY.md` index lines were specified. This section was added on top of the brief, matching the established convention this file already set for the `modkit.md` pins (Task 17), so the snapshot pins have the same durable, versioned record. `py -3 C:\Modding\tools\modkit.py snapshot take` was run once for real against both games during verification (read-only against game dirs, writes only under `<game>-manual\snapshots\`); it surfaced a genuine live finding baked into the pins above: Steam `AutoUpdateBehavior` is currently `0` ("always keep updated") for BOTH Skyrim and Cyberpunk 2077, not the required `1` — this is exactly the RDR2-near-miss failure mode the plan's warning exists to catch, and is a real action item for the user, not a config bug.

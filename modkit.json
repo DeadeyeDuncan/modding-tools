@@ -67,5 +67,28 @@
             ],
             "resources_staging": "C:\\Modding\\tmp\\dyndolod-resources"
         }
+    },
+    "snapshot": {
+        "skyrim": {
+            "ini": [
+                {"file": "C:\\Users\\auand\\Documents\\My Games\\Skyrim Special Edition\\Skyrim.ini",
+                 "section": "Display", "key": "iTexMipMapSkip"}
+            ],
+            "enb": {
+                "file": "E:\\SteamLibrary\\steamapps\\common\\Skyrim Special Edition\\enbseries.ini",
+                "keys": [
+                    {"section": "EFFECT", "key": "EnableComplexParticleLights"},
+                    {"section": "COMPLEXPARALLAXMATERIALS", "key": "Enable"},
+                    {"section": "COMPLEXPARTICLELIGHTS", "key": "EnableShadow"}
+                ]
+            },
+            "dllDir": "E:\\SteamLibrary\\steamapps\\common\\Skyrim Special Edition\\Data\\SKSE\\Plugins",
+            "steamAppId": 489830,
+            "appmanifest": "E:\\SteamLibrary\\steamapps\\appmanifest_489830.acf"
+        },
+        "cp77": {
+            "steamAppId": 1091500,
+            "appmanifest": "E:\\SteamLibrary\\steamapps\\appmanifest_1091500.acf"
+        }
     }
 }
