@@ -130,3 +130,38 @@ def test_capture_steam_appid_mismatch_warns(tmp_path):
 
 def test_capture_steam_unconfigured_skipped():
     assert snapshot.capture_steam({}) == (None, [])
+
+
+def test_capture_steam_missing_autoupdatebehavior_key_warns(tmp_path):
+    # Valid, parseable AppState block, appid matches configured steamAppId,
+    # but the AutoUpdateBehavior key itself is absent (not just falsy).
+    # Fail-safe contract: absent means "unknown, warn" - not "assume safe".
+    acf_no_autoupdate = (
+        '"AppState"\n{\n\t"appid"\t\t"489830"\n\t"name"\t\t"Skyrim SE"\n'
+        '\t"UserConfig"\n\t{\n\t\t"language"\t\t"english"\n\t}\n}\n')
+    p = tmp_path / "appmanifest_489830.acf"
+    p.write_text(acf_no_autoupdate, encoding="utf-8")
+    sec, warns = snapshot.capture_steam({"appmanifest": str(p), "steamAppId": 489830})
+    assert sec["appId"] == "489830"
+    assert sec["autoUpdateBehavior"] is None
+    assert len(warns) == 1
+    assert "AutoUpdateBehavior=None" in warns[0]
+    assert "unknown value" in warns[0]
+    assert "loader chain" in warns[0]
+    assert "not found" not in warns[0]
+
+
+def test_capture_steam_malformed_acf_warns_not_raises(tmp_path):
+    # Unbalanced braces: parses far enough to reach the '{' handling and
+    # then raises ValueError (unclosed block) rather than failing at
+    # tokenization. capture_steam must catch it and warn, not propagate.
+    malformed = '"AppState"\n{\n\t"appid"\t\t"489830"\n\t"AutoUpdateBehavior"\t\t"1"\n'
+    p = tmp_path / "appmanifest_489830.acf"
+    p.write_text(malformed, encoding="utf-8")
+    with pytest.raises(ValueError):
+        snapshot.parse_acf(malformed)  # confirms this fixture is actually malformed
+    sec, warns = snapshot.capture_steam({"appmanifest": str(p), "steamAppId": 489830})
+    assert sec == {"appmanifest": str(p), "appId": None, "autoUpdateBehavior": None}
+    assert len(warns) == 1
+    assert "unparseable" in warns[0]
+    assert str(p) in warns[0]
