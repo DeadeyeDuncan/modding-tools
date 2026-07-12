@@ -388,6 +388,30 @@ def register_plugins(sub, common):
     sp.set_defaults(func=cmd_plugins)
 
 
+def cmd_deploy(args):
+    from modkit import deploy, pluginstxt
+    preset = _preset(args)
+    staging = _staging_for(args, preset)
+    try:
+        return deploy.run_deploy(preset, staging, args.anchor, args.force, safe_print)
+    except (deploy.DeployError, pluginstxt.PluginsTxtError) as ex:
+        safe_print(f"ERROR: {ex}")
+        return 1
+
+
+def register_deploy(sub, common):
+    sp = sub.add_parser("deploy", parents=[common],
+                        help="game-not-running check, robocopy payload -> Data "
+                             "(exit <8 ok), Plugins.txt enable, ledger add. "
+                             "Exit 0 clean / 2 refused-pending-vets (--force overrides)")
+    sp.add_argument("--staging", default=None, help="staging dir (default: latest)")
+    sp.add_argument("--anchor", default=None,
+                    help="Plugins.txt: insert new plugins after this one")
+    sp.add_argument("--force", action="store_true",
+                    help="deploy even with missing vet stamps")
+    sp.set_defaults(func=cmd_deploy)
+
+
 def _preset(args):
     cfg = config.load(getattr(args, "config", None))
     game = getattr(args, "game", None)
@@ -425,6 +449,7 @@ def _register_all(sub, common):
     register_dllvet(sub, common)
     register_plugins(sub, common)
     register_conflicts(sub, common)
+    register_deploy(sub, common)
 
 
 def main(argv=None):
