@@ -412,6 +412,21 @@ def register_deploy(sub, common):
     sp.set_defaults(func=cmd_deploy)
 
 
+def cmd_verify(args):
+    from modkit import verify
+    preset = _preset(args)
+    staging = _staging_for(args, preset)
+    return verify.run_verify(preset, staging, safe_print)
+
+
+def register_verify(sub, common):
+    sp = sub.add_parser("verify", parents=[common],
+                        help="payload-vs-Data diff (NO extension filtering), "
+                             "_SWAP/_DISTR plugin-exists check, ledger check tail")
+    sp.add_argument("--staging", default=None, help="staging dir (default: latest)")
+    sp.set_defaults(func=cmd_verify)
+
+
 def _preset(args):
     cfg = config.load(getattr(args, "config", None))
     game = getattr(args, "game", None)
@@ -450,6 +465,7 @@ def _register_all(sub, common):
     register_plugins(sub, common)
     register_conflicts(sub, common)
     register_deploy(sub, common)
+    register_verify(sub, common)
 
 
 def main(argv=None):
