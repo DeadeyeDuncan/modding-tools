@@ -164,11 +164,15 @@ def register_stage(sub, common):
 
 
 def cmd_conflicts(args):
-    from modkit import conflicts, state
+    from modkit import conflicts, deploy, state
     preset = _preset(args)
+    if preset.DATA_DIR is None:
+        safe_print(f"ERROR: game {preset.NAME!r} has no data_dir - "
+                   "conflicts unsupported for this preset")
+        return 1
     staging = _staging_for(args, preset)
     st = state.InstallState.load(str(staging))
-    pay = state.payload_root(staging)
+    pay = deploy.data_root(preset, state.payload_root(staging))
     hits = conflicts.sweep(preset, pay)
     if not hits:
         safe_print("no file overlaps vs Data")
@@ -242,11 +246,11 @@ def register_fomod(sub, common):
 
 
 def cmd_esp(args):
-    from modkit import state, tes4
+    from modkit import deploy, state, tes4
     preset = _preset(args)
     staging = _staging_for(args, preset)
     st = state.InstallState.load(str(staging))
-    pay = state.payload_root(staging)
+    pay = deploy.data_root(preset, state.payload_root(staging))
     exts = getattr(preset, "PLUGIN_EXTS", ()) or (".esp", ".esm", ".esl")
     plugins = sorted(p for p in pay.rglob("*") if p.suffix.lower() in exts)
     if not plugins:
@@ -289,11 +293,11 @@ def register_esp(sub, common):
 
 
 def cmd_dllvet(args):
-    from modkit import peparse, state
+    from modkit import deploy, peparse, state
     preset = _preset(args)
     staging = _staging_for(args, preset)
     st = state.InstallState.load(str(staging))
-    pay = state.payload_root(staging)
+    pay = deploy.data_root(preset, state.payload_root(staging))
     dlls = sorted(p for p in pay.rglob("*") if p.suffix.lower() == ".dll")
     if not dlls:
         safe_print("no DLLs in payload - nothing to vet")
