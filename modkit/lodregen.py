@@ -323,8 +323,290 @@ def cmd_pre(args, cfg=None, preset=None):
     return 2 if warnings else 0
 
 
+# ------------------------------------------------------------ post helpers
+
+def tree_stats(root):
+    n, newest = 0, 0.0
+    for dirpath, _dirs, files in os.walk(root):
+        for f in files:
+            n += 1
+            newest = max(newest, os.path.getmtime(os.path.join(dirpath, f)))
+    return n, newest
+
+
+def data_relative_files(root):
+    root = str(root)
+    rels = []
+    for dirpath, _dirs, files in os.walk(root):
+        for f in files:
+            rels.append(os.path.relpath(os.path.join(dirpath, f), root))
+    rels.sort()
+    return rels
+
+
+def write_list(path, rels):
+    """UTF-8 BOM + CRLF, same shape ledger.py read_staged_list accepts."""
+    Path(path).write_bytes(b"\xef\xbb\xbf"
+                           + ("\r\n".join(rels) + "\r\n").encode("utf-8"))
+
+
+def robocopy_tree(src, dst):
+    """robocopy /E copy; caller applies the exit<8=success rule."""
+    p = subprocess.run(
+        ["robocopy", str(src), str(dst), "/E", "/R:2", "/W:2",
+         "/NJH", "/NJS", "/NP", "/NDL", "/NFL"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return p.returncode
+
+
+def freshness_problems(kind, root, min_files, pre_epoch, require=()):
+    """The empty-TexGen-exit / stale-output gate (§10 disk-artifact rule)."""
+    root = Path(root)
+    if not root.is_dir():
+        return [f"{kind}: output dir missing: {root}"]
+    n, newest = tree_stats(root)
+    problems = []
+    if n < min_files:
+        problems.append(f"{kind}: only {n} file(s) in {root} (< {min_files})"
+                        f" -- empty/partial run?")
+    if n and newest <= pre_epoch:
+        problems.append(f"{kind}: newest file predates `lodregen pre` -- "
+                        f"STALE output (tool did not run, or wrote elsewhere)")
+    for name in require:
+        if not (root / name).is_file():
+            problems.append(f"{kind}: expected file missing from output: {name}")
+    return problems
+
+
+def _resolve_run(args, sec):
+    if args.run:
+        d = Path(args.run)
+        return d, load_state(d)
+    pend = pending_runs(sec["holding_root"])
+    if not pend:
+        raise LodregenError(
+            "no pending regen run -- run `modkit lodregen pre` first "
+            "(see `modkit lodregen status`)")
+    return pend[-1]
+
+
+# ------------------------------------------------------------ post
+
 def cmd_post(args, cfg=None, preset=None):
-    raise LodregenError("cmd_post is implemented in Task 6 of the lodregen plan")
+    cfg = cfg if cfg is not None else config.load()
+    preset = preset if preset is not None else config.game(cfg, args.game)
+    sec = section(cfg, args.game)
+    try:
+        run_dir, state = _resolve_run(args, sec)
+    except LodregenError as e:
+        print(f"REFUSED: {e}")
+        return 1
+    if state.get("pre") is None:
+        print(f"REFUSED: run {run_dir} has no completed pre stage -- "
+              f"inspect it by hand")
+        return 1
+
+    # game/tool-process check mirrors cmd_pre's / deploy.game_running's
+    # 3-state contract: confirmed-running is a hard refusal (no --force,
+    # post re-enables plugins and writes to Data -- never safe to race a
+    # live game or generator GUI), an unverifiable tasklist warns and
+    # refuses UNLESS --force, only a clean read proceeds silently.
+    try:
+        procs = running_processes(list(preset.PROCESS_NAMES)
+                                  + list(sec["tool_processes"]))
+    except deploy.GameStateUnknown as ex:
+        if not args.force:
+            print(f"WARN: could not verify the game/tool processes are "
+                  f"closed: {ex}")
+            print("Rerun with --force if you are sure everything is closed.")
+            return 2
+        print(f"WARN: could not verify the game/tool processes are closed: "
+              f"{ex}; proceeding because --force was given")
+        procs = []
+    if procs:
+        print("REFUSED: process(es) running: " + ", ".join(procs))
+        print("Close them (game AND generator GUIs) before finishing a "
+              "regen bracket -- re-enabling plugins/deploying to Data while "
+              "one is open risks a scrambled Plugins.txt or a live-file "
+              "conflict.")
+        return 1
+
+    if args.stage == "texgen":
+        return _post_texgen(args, preset, sec, run_dir, state)
+    return _post_full(args, preset, sec, run_dir, state)
+
+
+def _post_texgen(args, preset, sec, run_dir, state):
+    pre_epoch = state["pre"]["epoch"]
+    out = sec["outputs"]["texgen"]
+    problems = freshness_problems("texgen", out,
+                                  sec["min_output_files"]["texgen"], pre_epoch)
+    if problems and not args.force:
+        for p in problems:
+            print("FRESHNESS FAIL: " + p)
+        print("TexGen output did NOT pass the gate -- re-run TexGen; do NOT "
+              "proceed to DynDOLOD on stale textures.")
+        return 1
+    rc = robocopy_tree(out, preset.DATA_DIR)
+    if rc >= 8:
+        print(f"DEPLOY FAILED: robocopy exit {rc} (>=8 = failure) copying "
+              f"{out} -> {preset.DATA_DIR}")
+        return 1
+    files = data_relative_files(out)
+    write_list(Path(run_dir) / "deploy-texgen.txt", files)
+    state["texgen_deployed"] = {
+        "stamp": _now().isoformat(timespec="seconds"),
+        "files": len(files),
+        "robocopy_rc": rc,
+        "forced_past": problems,
+    }
+    save_state(run_dir, state)
+    print(f"TexGen output deployed: {len(files)} file(s), robocopy exit {rc} "
+          f"(<8 = success).")
+    print("NEXT: USER launches DynDOLOD (see the ritual `pre` printed), then "
+          f"run: modkit lodregen post --game {args.game}")
+    return 0
+
+
+def _post_full(args, preset, sec, run_dir, state):
+    pre_epoch = state["pre"]["epoch"]
+    warnings = []
+    trio = sec["trio"]
+
+    if state.get("texgen_deployed") is None:
+        msg = ("TexGen output was never deployed via `post --stage texgen`. "
+               "If DynDOLOD already ran, it read STALE LOD textures -- "
+               "correct fix: deploy TexGen output, re-run DynDOLOD.")
+        if not args.force:
+            print("REFUSED: " + msg)
+            return 1
+        warnings.append("forced past missing texgen deploy: " + msg)
+
+    out = sec["outputs"]["dyndolod"]
+    problems = freshness_problems("dyndolod", out,
+                                  sec["min_output_files"]["dyndolod"],
+                                  pre_epoch, require=tuple(trio))
+    if not state["pre"]["no_pgpatcher"]:
+        dj = Path(preset.DATA_DIR) / "ParallaxGen_Diff.json"
+        if not dj.is_file() or dj.stat().st_mtime <= pre_epoch:
+            problems.append(
+                "pgpatcher: Data\\ParallaxGen_Diff.json missing or older "
+                "than pre -- was the PGPatcher output deployed before TexGen?")
+    if problems:
+        if not args.force:
+            for p in problems:
+                print("FRESHNESS FAIL: " + p)
+            print("Nothing deployed; trio still held aside. Fix the run and "
+                  "re-invoke post.")
+            return 1
+        warnings += ["forced past: " + p for p in problems]
+
+    # masters verify BEFORE anything is enabled (the armed-CTD guard):
+    # verify the OUTPUT copies against the CURRENT Plugins.txt plus the
+    # trio itself (deployed & enabled in order below).
+    lines = pluginstxt.read(preset)
+    future_enabled = enabled_plugins(lines) + [t.lower() for t in trio]
+    trio_problems = []
+    for name in trio:
+        candidate = Path(out) / name
+        if candidate.is_file():
+            trio_problems += master_problems(candidate, preset.DATA_DIR,
+                                             future_enabled,
+                                             also_present=trio)
+    if trio_problems and not args.force:
+        for p in trio_problems:
+            print("MASTERS FAIL: " + p)
+        print("Trio NOT deployed or enabled -- launching now would CTD. "
+              "A master was removed/disabled mid-regen, or Plugins.txt was "
+              "rewritten behind the bracket (the post-reboot trap). Diff:")
+        print(pluginstxt.diff(state["pre"]["plugins_snapshot"],
+                              pluginstxt.snapshot(preset,
+                                                  "lodregen-masterfail")))
+        return 1
+    warnings += ["forced past: " + p for p in trio_problems]
+
+    rc = robocopy_tree(out, preset.DATA_DIR)
+    if rc >= 8:
+        print(f"DEPLOY FAILED: robocopy exit {rc} (>=8 = failure); trio not "
+              f"re-enabled.")
+        return 1
+    files = data_relative_files(out)
+    write_list(Path(run_dir) / "deploy-dyndolod.txt", files)
+
+    # trio re-enable: esm -> esp -> Occlusion, block LAST (wiki correction:
+    # Occlusion.esp absolute last, per dyndolod.info/Help/Occlusion-Data)
+    pluginstxt.enable(preset, trio[0], None)
+    pluginstxt.enable(preset, trio[1], trio[0])
+    pluginstxt.enable(preset, trio[2], trio[1])
+    tail = enabled_plugins(pluginstxt.read(preset))[-3:]
+    if tail != [t.lower() for t in trio]:
+        print(f"TAIL VERIFY FAIL: last enabled plugins are {tail}, expected "
+              f"{[t.lower() for t in trio]}.")
+        print("Fix the order with `modkit plugins` (never hand-edit), then "
+              "re-run post.")
+        return 1
+
+    post_snap = pluginstxt.snapshot(preset, f"lodregen-post-{state['run_id']}")
+    report = pluginstxt.diff(state["pre"]["plugins_snapshot"], post_snap)
+    (Path(run_dir) / "plugins-diff.txt").write_text(report, encoding="utf-8")
+    print("Plugins.txt diff vs pre snapshot (expected: only the trio cycled "
+          "disabled -> re-enabled at the tail; anything else = investigate):")
+    print(report)
+
+    # ledger record: supersede old entries, add dated entries (see the
+    # mechanism note at the top of Task 6)
+    ledger_entries = {}
+    for key, list_name, extra in (
+            ("texgen", "deploy-texgen.txt", []),
+            ("dyndolod", "deploy-dyndolod.txt",
+             ["--plugin", trio[0], "--plugin", trio[1], "--plugin", trio[2]])):
+        list_file = Path(run_dir) / list_name
+        if not list_file.is_file():
+            warnings.append(f"no deploy list for {key} -- ledger not updated "
+                            f"for it")
+            continue
+        prefix = sec["ledger_prefixes"][key]
+        new_name = f"{prefix} (regen {state['run_id']})"
+        old = active_output_entry(args.game, prefix)
+        if old:
+            rc1, out1 = ledger_bridge.run(
+                ["remove", "--game", args.game, "--name", old,
+                 "--reason", f"superseded by lodregen {state['run_id']}",
+                 "--to", str(Path(run_dir) / "quarantine")])
+            if rc1 != 0:
+                warnings.append(f"ledger remove failed for {old!r}: "
+                                f"{out1.strip()}")
+        note = (f"lodregen {state['run_id']}: regen recorded by `modkit "
+                f"lodregen post`; trio re-enabled {trio[0]} -> {trio[1]} -> "
+                f"{trio[2]} (Occlusion last); masters verified")
+        rc2, out2 = ledger_bridge.run(
+            ["add", "--game", args.game, "--name", new_name,
+             "--files-from", str(list_file), "--role", "lod-output",
+             "--note", note] + extra)
+        if rc2 != 0:
+            warnings.append(
+                f"ledger add failed for {new_name!r}: {out2.strip()} -- "
+                f"record manually: py -3 C:\\Modding\\tools\\ledger.py add "
+                f"--game {args.game} --name \"{new_name}\" --files-from "
+                f"\"{list_file}\"")
+        ledger_entries[key] = new_name
+
+    state["post"] = {
+        "stamp": _now().isoformat(timespec="seconds"),
+        "deployed": {"dyndolod": len(files)},
+        "robocopy_rc": rc,
+        "ledger_entries": ledger_entries,
+        "warnings": warnings,
+    }
+    save_state(run_dir, state)
+    print(f"lodregen post complete -- run {state['run_id']}: {len(files)} "
+          f"DynDOLOD file(s) deployed, trio live "
+          f"({trio[0]} -> {trio[1]} -> {trio[2]}).")
+    print("Trio pre-regen copies + quarantined old output remain in "
+          f"{run_dir} (quarantine-never-delete).")
+    for w in warnings:
+        print("  WARN: " + w)
+    return 2 if warnings else 0
 
 
 def register(sub):

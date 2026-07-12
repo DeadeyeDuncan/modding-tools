@@ -688,3 +688,215 @@ def test_master_problems_also_present_covers_undeployed_trio(tmp_path):
 def test_enabled_plugins_strips_stars_and_comments():
     lines = ["# comment", "*Foo.esp", "Disabled.esp", "*Bar.esm", ""]
     assert lodregen.enabled_plugins(lines) == ["foo.esp", "bar.esm"]
+
+
+# ---------------------------------------------------------------- Task 6
+
+def _post_args(**kw):
+    d = dict(game="skyrim", stage="full", run=None, force=False)
+    d.update(kw)
+    return SimpleNamespace(**d)
+
+
+def run_pre(env):
+    write_manifest_fixture(env, "DynDOLOD Output", [])
+    rc = lodregen.cmd_pre(_pre_args(no_pgpatcher=True), cfg=env.cfg,
+                          preset=env.preset)
+    assert rc in (0, 2)
+    return lodregen.pending_runs(env.sec["holding_root"])[0]
+
+
+def fill_output(sec, kind, n, trio=(), master_lists=None):
+    """Populate a fake tool-output dir with n dummy files (+ trio plugins)."""
+    root = Path(sec["outputs"][kind])
+    root.mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        f = root / "textures" / f"gen_{i}.dds"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"new")
+    for name in trio:
+        masters = (master_lists or {}).get(name, ["Skyrim.esm"])
+        (root / name).write_bytes(make_tes4(masters))
+    return root
+
+
+def test_freshness_fails_on_missing_empty_stale(tmp_path):
+    sec = fixture_section(tmp_path)
+    probs = lodregen.freshness_problems("texgen", sec["outputs"]["texgen"],
+                                        3, pre_epoch=0.0)
+    assert probs and "missing" in probs[0]
+    fill_output(sec, "texgen", 1)
+    probs = lodregen.freshness_problems("texgen", sec["outputs"]["texgen"],
+                                        3, pre_epoch=0.0)
+    assert any("only 1" in p for p in probs)
+    fill_output(sec, "texgen", 5)
+    future = 4102444800.0  # year 2100: everything is older -> stale
+    probs = lodregen.freshness_problems("texgen", sec["outputs"]["texgen"],
+                                        3, pre_epoch=future)
+    assert any("STALE" in p for p in probs)
+    probs = lodregen.freshness_problems("texgen", sec["outputs"]["texgen"],
+                                        3, pre_epoch=0.0)
+    assert probs == []
+
+
+def test_post_texgen_stage_gates_then_deploys(tmp_path, monkeypatch, capsys):
+    env = make_env(tmp_path, monkeypatch)
+    run_dir, state = run_pre(env)
+    # empty output -> refuse, nothing deployed
+    rc = lodregen.cmd_post(_post_args(stage="texgen"), cfg=env.cfg,
+                           preset=env.preset)
+    assert rc == 1
+    assert "FRESHNESS FAIL" in capsys.readouterr().out
+    # fresh output -> deploys into Data, records state
+    fill_output(env.sec, "texgen", 5)
+    rc = lodregen.cmd_post(_post_args(stage="texgen"), cfg=env.cfg,
+                           preset=env.preset)
+    assert rc == 0
+    assert (env.data / "textures" / "gen_0.dds").is_file()
+    _d, s = lodregen.pending_runs(env.sec["holding_root"])[0]
+    assert s["texgen_deployed"]["files"] == 5
+    assert (run_dir / "deploy-texgen.txt").is_file()
+
+
+def test_post_full_happy_path(tmp_path, monkeypatch, capsys):
+    env = make_env(tmp_path, monkeypatch)
+    run_dir, state = run_pre(env)
+    fill_output(env.sec, "texgen", 5)
+    assert lodregen.cmd_post(_post_args(stage="texgen"), cfg=env.cfg,
+                             preset=env.preset) == 0
+    trio = env.sec["trio"]
+    fill_output(env.sec, "dyndolod", 8, trio=trio, master_lists={
+        "DynDOLOD.esm": ["Skyrim.esm"],
+        "DynDOLOD.esp": ["Skyrim.esm", "DynDOLOD.esm"],
+        "Occlusion.esp": ["Skyrim.esm", "DynDOLOD.esm"],
+    })
+    rc = lodregen.cmd_post(_post_args(), cfg=env.cfg, preset=env.preset)
+    out = capsys.readouterr().out
+    assert rc in (0, 2)
+    # trio deployed + re-enabled at the tail, esm -> esp -> Occlusion LAST
+    from modkit import pluginstxt
+    for name in trio:
+        assert (env.data / name).is_file()
+    enabled = lodregen.enabled_plugins(pluginstxt.read(env.preset))
+    assert enabled[-3:] == [t.lower() for t in trio]
+    # run finalized, diff written, no longer pending
+    assert lodregen.pending_runs(env.sec["holding_root"]) == []
+    assert (run_dir / "plugins-diff.txt").is_file()
+    assert (run_dir / "deploy-dyndolod.txt").is_file()
+    # ledger: superseded entry removed, dated entry added with files-from
+    removes = [c for c in env.ledger_calls if c[0] == "remove"]
+    assert any(c[c.index("--name") + 1] == "DynDOLOD Output" for c in removes)
+    adds = [c for c in env.ledger_calls if c[0] == "add"]
+    dyn_adds = [c for c in adds if c[c.index("--name") + 1]
+                .startswith("DynDOLOD Output (regen")]
+    assert dyn_adds and "--files-from" in dyn_adds[0]
+    tex_adds = [c for c in adds if c[c.index("--name") + 1]
+                .startswith("TexGen Output (regen")]
+    assert tex_adds and "--files-from" in tex_adds[0]
+
+
+def test_post_full_masters_fail_blocks_enable(tmp_path, monkeypatch, capsys):
+    env = make_env(tmp_path, monkeypatch)
+    run_pre(env)
+    fill_output(env.sec, "texgen", 5)
+    assert lodregen.cmd_post(_post_args(stage="texgen"), cfg=env.cfg,
+                             preset=env.preset) == 0
+    trio = env.sec["trio"]
+    # Occlusion masters a mod that is NOT in Data/Plugins.txt -> the
+    # post-reboot-rewrite CTD scenario, must hard-fail BEFORE enabling
+    fill_output(env.sec, "dyndolod", 8, trio=trio, master_lists={
+        "DynDOLOD.esm": ["Skyrim.esm"],
+        "DynDOLOD.esp": ["Skyrim.esm", "DynDOLOD.esm"],
+        "Occlusion.esp": ["Skyrim.esm", "RemovedWorldMod.esp"],
+    })
+    rc = lodregen.cmd_post(_post_args(), cfg=env.cfg, preset=env.preset)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "MASTERS FAIL" in out and "RemovedWorldMod.esp" in out
+    from modkit import pluginstxt
+    enabled = lodregen.enabled_plugins(pluginstxt.read(env.preset))
+    for name in trio:
+        assert name.lower() not in enabled     # nothing was armed
+    assert lodregen.pending_runs(env.sec["holding_root"]) != []  # still open
+
+
+def test_post_full_refuses_without_texgen_deploy(tmp_path, monkeypatch, capsys):
+    env = make_env(tmp_path, monkeypatch)
+    run_pre(env)
+    fill_output(env.sec, "dyndolod", 8, trio=env.sec["trio"])
+    rc = lodregen.cmd_post(_post_args(), cfg=env.cfg, preset=env.preset)
+    assert rc == 1
+    assert "TexGen output was never deployed" in capsys.readouterr().out
+
+
+def test_post_refuses_with_no_pending_run(tmp_path, monkeypatch, capsys):
+    env = make_env(tmp_path, monkeypatch)
+    rc = lodregen.cmd_post(_post_args(), cfg=env.cfg, preset=env.preset)
+    assert rc == 1
+    assert "no pending regen run" in capsys.readouterr().out
+
+
+def test_write_list_and_data_relative_files(tmp_path):
+    root = tmp_path / "out"
+    (root / "meshes").mkdir(parents=True)
+    (root / "meshes" / "b.nif").write_bytes(b"x")
+    (root / "a.esp").write_bytes(b"x")
+    rels = lodregen.data_relative_files(root)
+    assert rels == ["a.esp", os.path.join("meshes", "b.nif")]
+    lst = tmp_path / "list.txt"
+    lodregen.write_list(lst, rels)
+    assert lodregen.read_lines_bomsafe(lst) == rels
+
+
+# ---- extra: post must mirror pre's GameStateUnknown 3-state handling
+# (deploy.py's contract) -- required by the task brief's "Critical safety
+# semantics" ("mirror deploy's 3-state ... if the brief gates post on it");
+# cmd_post DOES gate on running_processes, so the same unverifiable-state
+# handling as cmd_pre applies here.
+
+def test_post_warns_and_refuses_when_game_state_unknown(tmp_path, monkeypatch, capsys):
+    from modkit import deploy
+    env = make_env(tmp_path, monkeypatch)
+    run_pre(env)
+
+    def raise_unknown(names):
+        raise deploy.GameStateUnknown("tasklist exited 1: access denied")
+    monkeypatch.setattr(lodregen, "running_processes", raise_unknown)
+    rc = lodregen.cmd_post(_post_args(stage="texgen"), cfg=env.cfg,
+                           preset=env.preset)
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "WARN" in out and "could not verify" in out.lower()
+    assert "--force" in out
+    # nothing deployed while state is unverifiable
+    run_dir, state = lodregen.pending_runs(env.sec["holding_root"])[0]
+    assert state["texgen_deployed"] is None
+    assert not (run_dir / "deploy-texgen.txt").exists()
+
+
+def test_post_force_proceeds_past_game_state_unknown(tmp_path, monkeypatch, capsys):
+    from modkit import deploy
+    env = make_env(tmp_path, monkeypatch)
+    run_pre(env)
+    fill_output(env.sec, "texgen", 5)
+
+    def raise_unknown(names):
+        raise deploy.GameStateUnknown("tasklist exited 1: access denied")
+    monkeypatch.setattr(lodregen, "running_processes", raise_unknown)
+    rc = lodregen.cmd_post(_post_args(stage="texgen", force=True), cfg=env.cfg,
+                           preset=env.preset)
+    capsys.readouterr()
+    assert rc == 0
+    assert (env.data / "textures" / "gen_0.dds").is_file()
+
+
+def test_post_refuses_when_process_confirmed_running(tmp_path, monkeypatch, capsys):
+    env = make_env(tmp_path, monkeypatch)
+    run_pre(env)
+    monkeypatch.setattr(lodregen, "running_processes",
+                        lambda names: ["DynDOLODx64.exe"])
+    rc = lodregen.cmd_post(_post_args(stage="texgen", force=True), cfg=env.cfg,
+                           preset=env.preset)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "REFUSED" in out and "DynDOLODx64.exe" in out
