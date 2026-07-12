@@ -27,7 +27,7 @@ Command crib:
 - `plugins list|enable|disable|snapshot|diff` - BOM/CRLF-safe Plugins.txt; snapshot/diff around Wrye Bash/xEdit/DynDOLOD
 
 **Why:** the hand-rolled install pipeline re-fired its known failure modes every session (reflection-notes #1: FO4 mix-ups x3, include-pattern failures x4, anchor slips x2, wrong-runtime DLLs, half-installs undetected for days).
-**How to apply:** NEVER hand-roll 7z x / Expand-Archive / robocopy-to-Data / Plugins.txt writes / ledger.json edits - a PreToolUse guard will warn if you try. ledger.py stays the sole ledger writer (modkit calls it). Config: C:\Modding\tools\modkit.json. Spec/plan: C:\Modding\tools\docs\2026-07-11-modkit-*.md.
+**How to apply:** NEVER hand-roll 7z x / Expand-Archive / robocopy-to-Data / Plugins.txt writes / ledger.json edits - modkit owns them. ledger.py stays the sole ledger writer (modkit calls it). An advisory PreToolUse guard to flag hand-rolling is planned but not yet shipped. Config: C:\Modding\tools\modkit.json. Spec/plan: C:\Modding\tools\docs\2026-07-11-modkit-*.md.
 ```
 
 ## Cyberpunk 2077
@@ -44,7 +44,7 @@ metadata:
 
 Installs and removals are driven by **modkit** (thin CP77 preset): `py -3 C:\Modding\tools\modkit.py <cmd> --game cp77`. Pipeline: `intake -> stage -> conflicts -> deploy -> verify` (no fomod/dllvet/esp/plugins - no plugin system). Per-install state in `C:\Modding\staging\cp77\...\install.json`; run `status --game cp77` at session start. The `mod-install` skill has the full playbook.
 
-- `deploy` targets game-root subdirs (archive\pc\mod, red4ext, r6, bin); stray top-level payload files make it refuse - restage properly instead of forcing.
+- `deploy` targets the four top-level game-root dirs: archive, red4ext, r6, bin (CP77 mod files live under archive\pc\mod\ within archive, not as a separate top-level target); stray top-level payload files make it refuse - restage properly instead of forcing.
 - `conflicts` reports .archive alphabetical ordering in archive\pc\mod plus file overlaps (red4ext plugin dir collisions included).
 - `remove "<Name>" --reason "..."` quarantines to C:\Modding\cyberpunk-manual\backups (never deletes) and records via ledger.py.
 
