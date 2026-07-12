@@ -142,6 +142,60 @@ def test_status_clean_when_complete(tmp_path, capsys):
     assert "COMPLETE" in out
 
 
+def test_new_run_collision_raises(tmp_path, monkeypatch):
+    """new_run() uses mkdir(parents=True, exist_ok=False) on purpose: a
+    same-second run_id collision must raise instead of silently stepping
+    into (and potentially corrupting) another in-flight run's state file.
+    Lock that behavior in by pinning _now() so two calls collide."""
+    sec = fixture_section(tmp_path)
+    fixed = lodregen._now()
+    monkeypatch.setattr(lodregen, "_now", lambda: fixed)
+    lodregen.new_run(sec, "skyrim")
+    with pytest.raises(FileExistsError):
+        lodregen.new_run(sec, "skyrim")
+
+
+def test_status_skips_corrupt_run_json(tmp_path, capsys):
+    """all_runs() used to call load_state() with no guard, so one corrupt
+    or foreign lodregen-run.json raised and aborted cmd_status for every
+    run and game -- ironic for a status reporter. Now it's skipped (BROKEN
+    unreadable) and the well-formed run still reports; status still exits
+    0. (The well-formed run here is COMPLETE rather than merely PENDING:
+    a genuinely PENDING lodregen run legitimately returns exit 2 by
+    existing, deliberate design -- see test_status_lists_pending_and_exits_2
+    -- a pending regen blocks the game launch, and that contract is
+    unrelated to and unchanged by this corrupt-json resilience fix.)"""
+    sec = fixture_section(tmp_path)
+    cfg = {"lodregen": {"skyrim": sec}}
+    run_dir, state = lodregen.new_run(sec, "skyrim")
+    state["pre"] = {"stamp": "2026-07-11T10:00:00", "epoch": 1.0}
+    state["post"] = {"stamp": "2026-07-11T12:00:00"}
+    lodregen.save_state(run_dir, state)
+
+    broken_dir = Path(sec["holding_root"]) / "20260711-999999"
+    broken_dir.mkdir(parents=True)
+    (broken_dir / lodregen.RUN_STATE).write_text("{not valid json", encoding="utf-8")
+
+    rc = lodregen.cmd_status(SimpleNamespace(game="skyrim"), cfg=cfg)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "COMPLETE" in out
+    assert state["run_id"] in out
+    assert "BROKEN" in out and "unreadable" in out
+
+
+def test_cli_reports_lodregen_error_cleanly(game_env, run_cli):
+    """main() in cli.py caught config.ConfigError but not
+    lodregen.LodregenError, so `lodregen status --game <no-section>` dumped
+    a raw traceback instead of the codebase's ERROR: ... + exit-1 pattern.
+    game_env's modkit.json has a "skyrim" game preset but no "lodregen"
+    section at all, which is exactly what section() rejects."""
+    code, out = run_cli("lodregen", "status", "--game", "skyrim")
+    assert code == 1
+    assert "ERROR" in out
+    assert "no lodregen section" in out
+
+
 def test_register_wires_three_subcommands():
     import argparse
     p = argparse.ArgumentParser()

@@ -563,6 +563,6 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except config.ConfigError as ex:
+    except (config.ConfigError, lodregen.LodregenError) as ex:
         safe_print(f"ERROR: {ex}")
         return 1

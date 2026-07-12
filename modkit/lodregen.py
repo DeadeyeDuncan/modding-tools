@@ -91,18 +91,32 @@ def save_state(run_dir, state):
 
 
 def all_runs(holding_root):
+    """[(run_dir, state), ...] sorted by dir name. A run dir whose
+    lodregen-run.json is unreadable/malformed/foreign yields state=None
+    instead of raising, so one corrupt run never aborts the whole listing
+    (and therefore never aborts `status` for every run and game)."""
     root = Path(holding_root)
     if not root.is_dir():
         return []
     out = []
     for d in sorted(root.iterdir()):
-        if d.is_dir() and (d / RUN_STATE).is_file():
-            out.append((d, load_state(d)))
+        if not (d.is_dir() and (d / RUN_STATE).is_file()):
+            continue
+        try:
+            state = load_state(d)
+        except (OSError, ValueError):
+            out.append((d, None))
+            continue
+        if not isinstance(state, dict):
+            out.append((d, None))
+            continue
+        out.append((d, state))
     return out
 
 
 def pending_runs(holding_root):
-    return [(d, s) for d, s in all_runs(holding_root) if s.get("post") is None]
+    return [(d, s) for d, s in all_runs(holding_root)
+            if s is not None and s.get("post") is None]
 
 
 # ------------------------------------------------------------ status
@@ -117,6 +131,9 @@ def cmd_status(args, cfg=None):
         return 0
     pending = 0
     for d, s in runs:
+        if s is None:
+            print(f"  {d.name}  BROKEN    unreadable lodregen-run.json -- inspect {d}")
+            continue
         if s.get("post") is not None:
             print(f"  {s['run_id']}  COMPLETE  post {s['post']['stamp']}")
         elif s.get("pre") is None:
