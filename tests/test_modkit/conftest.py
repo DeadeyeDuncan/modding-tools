@@ -27,6 +27,13 @@ def game_env(tmp_path, monkeypatch):
         b"*DynDOLOD.esm\r\n"
         b"*DynDOLOD.esp\r\n"
         b"*Occlusion.esp\r\n")
+    ledger_json = root / "ledger.json"
+    ledger_json.write_text(json.dumps({
+        "game": "Skyrim Special Edition",
+        "dataDir": str(root / "Data"),
+        "pluginsTxt": str(plugins),
+        "mods": [{"name": "Already Installed Mod", "installed": "2026-07-01"}],
+    }), encoding="utf-8")
     cfg = {
         "sevenzip": r"C:\Program Files\7-Zip\7z.exe",
         "downloads": [str(root / "downloads")],
@@ -40,6 +47,7 @@ def game_env(tmp_path, monkeypatch):
                 "backups_dir": str(root / "backups"),
                 "manifests_dir": str(root / "manifests"),
                 "vortex_downloads": None,
+                "ledger": str(ledger_json),
             }
         },
     }
@@ -53,3 +61,17 @@ def game_env(tmp_path, monkeypatch):
 def preset(game_env):
     from modkit import config
     return config.game(config.load(), "skyrim")
+
+
+SEVENZIP = Path(r"C:\Program Files\7-Zip\7z.exe")
+needs_7z = pytest.mark.skipif(not SEVENZIP.is_file(), reason="7z.exe not installed")
+
+
+@pytest.fixture
+def run_cli(capsys):
+    from modkit import cli
+
+    def _run(*argv):
+        code = cli.main(list(argv))
+        return code, capsys.readouterr().out
+    return _run

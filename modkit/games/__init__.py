@@ -55,4 +55,5 @@ def load(cfg, name):
     mod.VORTEX_DOWNLOADS = g.get("vortex_downloads")
     mod.DOWNLOADS = list(cfg.get("downloads", []))
     mod.SEVENZIP = cfg["sevenzip"]
+    mod.LEDGER = g.get("ledger")
     return mod
