@@ -15,7 +15,10 @@ Ground truth: wiki `concepts/skyrim-dyndolod-generation`,
   `--no-pgpatcher` = this pass skips PGPatcher. `--clean-texgen` = ALSO
   quarantine old TexGen output — default is **never** (see step 1 below);
   only pass this if you deliberately want a from-scratch TexGen clean.
-  `--force` = proceed past a pending-run refusal or a missing tool exe.
+  `--force` = proceed past a pending-run refusal, a missing tool exe, or an
+  unverifiable game-state refusal (process check couldn't confirm the game/
+  tools are closed — `GameStateUnknown`); that last one downgrades from a
+  hard refusal (exit 2) to warn-and-proceed.
 - `lodregen post --game GAME [--stage {texgen,full}] [--run RUN] [--force]`
   `--stage texgen` = mid-ritual TexGen_Output deploy (step 6); `full`
   (default) = after DynDOLOD (step 8). `--run` targets a specific run dir
@@ -118,20 +121,56 @@ UI, gameplay, NPC face/body, interiors, SKSE DLLs.
 
 ## Failure playbook
 
+General `--force` rule: safe for the pending-run refusal, the
+can't-verify-game-state refusal, and the missing-tool-exe refusal (all
+three just skip a check that couldn't *confirm* a bad state). UNSAFE for
+MASTERS FAIL and either FRESHNESS FAIL (those checks caught a real bad
+state — forcing past arms it).
+
 - **`pre` reports PROTECTED hits** — the old output manifest is polluted
   with input/stand-in files. The files were kept. Re-author the manifest
   from actual tool output only; if an input is missing anyway, no-clobber
   restore from `C:\Modding\tmp\dyndolod-resources` (fills gaps, overwrites
   nothing).
 - **`post` FRESHNESS FAIL** — the tool didn't run / wrote elsewhere / exited
-  empty. Re-run that GUI stage. Never `--force` past a texgen freshness
-  fail into DynDOLOD.
+  empty. Fires in `--stage texgen` (TexGen_Output stale/empty) and in the
+  default full stage (DynDOLOD_Output stale/empty, missing trio files in
+  the output, or — unless `--no-pgpatcher` — `ParallaxGen_Diff.json`
+  missing/older than `pre`). Re-run that GUI stage. **Never `--force` past
+  a texgen-stage FRESHNESS FAIL into DynDOLOD** (DynDOLOD would read
+  stale/empty textures), and **never `--force` past a DynDOLOD-stage
+  FRESHNESS FAIL** either (the trio then gets deployed and enabled against
+  stale/empty DynDOLOD output).
 - **`post` MASTERS FAIL** — a master of the new trio is missing/disabled.
   The trio was NOT enabled; the game is safe to leave alone but NOT
   regen-complete. Restore the master (or regen again without it), re-run
   post. Read the printed diff for what changed behind the bracket.
-- **TAIL VERIFY FAIL** — something reordered Plugins.txt mid-bracket
-  (Wrye Bash scramble class). Fix order with `modkit plugins`, re-run post.
+  **Never `--force` past MASTERS FAIL** — the code calls this the
+  armed-CTD guard, and the refusal message says launching now would CTD;
+  `--force` genuinely bypasses the missing-master check and arms it.
+- **`REFUSED: Occlusion.esp will not be last`** (Layer 1 — pre-deploy
+  refusal) — before touching anything, `post` simulates the exact trio
+  `enable()` sequence against the CURRENT Plugins.txt and refuses if
+  Occlusion.esp would not land absolute last at the trio's existing
+  Plugins.txt position(s) — e.g. a prior Plugins.txt reorder (a Wrye Bash
+  scramble class, or a foreign plugin appended after Occlusion) left
+  something else after the trio's slot. Fires BEFORE robocopy: **nothing
+  is deployed**, the trio stays disabled, the run stays PENDING. No
+  `--force` bypass — there is no legitimate reason to knowingly arm the
+  wiki-bad tail order. Fix order with `modkit plugins` (never hand-edit),
+  then re-run `post`.
+- **`TAIL VERIFY FAIL`** (Layer 2 — post-deploy race rollback) — a
+  defense-in-depth backstop for when Layer 1's simulation passed but the
+  live result didn't: a genuine concurrency race, where some other actor
+  enables a plugin during `post`'s own execution, between the trio's three
+  `enable()` calls and the post-enable tail read. By this point **deploy
+  HAS already happened** (DynDOLOD output is live in Data); the trio's
+  Plugins.txt lines are auto-**rolled back** (re-disabled) to the safe
+  state; the run stays PENDING. Fix order with `modkit plugins`, then
+  re-run `post`. (Do not attribute the Wrye-Bash-reorder cause to this
+  entry — that's Layer 1's `REFUSED: Occlusion.esp will not be last`
+  above; by the time Layer 2 can fire, Layer 1 already agreed the order
+  was fine.)
 - **Interrupted mid-ritual (crash/reboot/session death)** — the run stays
   PENDING: `modkit lodregen status --game skyrim` at session start shows
   it (exit 2). Do NOT launch the game while pending (trio held aside =
@@ -147,8 +186,12 @@ UI, gameplay, NPC face/body, interiors, SKSE DLLs.
 
 ## Post-regen leftovers
 
-`<holding_root>\<run_id>\` keeps: the pre/post Plugins.txt snapshots
-(via pluginstxt backups), `trio\` (pre-regen plugin files), `quarantine\`
-(old output files), `deploy-*.txt` lists, `plugins-diff.txt`, and
-`lodregen-run.json`. Prune old run dirs manually once a regen is verified
-in-game — never automatically.
+`<holding_root>\<run_id>\` keeps: `trio\` (pre-regen plugin files),
+`quarantine\` (old output files), `deploy-*.txt` lists, `plugins-diff.txt`,
+and `lodregen-run.json` — which records only the *path string* to each
+pre/post Plugins.txt snapshot, not the snapshot file itself. The actual
+snapshots (`pluginstxt.snapshot`) are written to `preset.BACKUPS_DIR`
+(this build: `C:\Modding\skyrim-manual\backups\`) — the PARENT of
+`holding_root` (`...\backups\lodregen`), i.e. a sibling of the run-id
+folders, NOT inside them. Prune old run dirs manually once a regen is
+verified in-game — never automatically.
