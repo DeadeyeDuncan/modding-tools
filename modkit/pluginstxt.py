@@ -85,6 +85,38 @@ def diff(path_a, path_b):
     return "\n".join(out) if out else "no differences"
 
 
+def _apply_enable(lines, plugin, anchor, dyndolod_block=()):
+    """Pure line-list mutation: the actual enable placement logic, with no
+    file I/O. A pre-existing line is starred IN PLACE (never moved); only a
+    brand-new line is positioned via `anchor` (or block_start if no anchor).
+    Returns a NEW list; `lines` is not mutated. Split out of enable() so a
+    caller (lodregen's Occlusion-last dry run) can simulate the exact same
+    placement pluginstxt.enable() will perform, with zero risk of the two
+    implementations drifting apart."""
+    lines = list(lines)
+    target = plugin.lstrip("*").strip()
+    tname = target.lower()
+    idx_of = {_name(l): i for i, l in enumerate(lines) if l.strip()}
+    if anchor and _name(anchor) not in idx_of:
+        raise PluginsTxtError(f"anchor {anchor!r} not found in Plugins.txt "
+                              "(anchors are case-insensitive, '*' optional)")
+    if tname in idx_of:
+        i = idx_of[tname]
+        lines[i] = "*" + lines[i].lstrip("*")
+    else:
+        block = tuple(n.lower() for n in dyndolod_block or ())
+        block_start = len(lines)
+        for i, l in enumerate(lines):
+            if _name(l) in block:
+                block_start = i
+                break
+        index = idx_of[_name(anchor)] + 1 if anchor else block_start
+        if tname not in block and index > block_start:
+            index = block_start  # DynDOLOD block stays last
+        lines.insert(index, "*" + target)
+    return lines
+
+
 def enable(preset, plugin, anchor):
     """Enable (insert or star-in-place). Snapshot-first, atomic, validated after."""
     path = _plugins_path(preset)
@@ -96,20 +128,8 @@ def enable(preset, plugin, anchor):
         raise PluginsTxtError(f"anchor {anchor!r} not found in Plugins.txt "
                               "(anchors are case-insensitive, '*' optional)")
     snapshot(preset, "pre-enable")
-    if tname in idx_of:
-        i = idx_of[tname]
-        lines[i] = "*" + lines[i].lstrip("*")
-    else:
-        block = tuple(n.lower() for n in getattr(preset, "DYNDOLOD_BLOCK", ()) or ())
-        block_start = len(lines)
-        for i, l in enumerate(lines):
-            if _name(l) in block:
-                block_start = i
-                break
-        index = idx_of[_name(anchor)] + 1 if anchor else block_start
-        if tname not in block and index > block_start:
-            index = block_start  # DynDOLOD block stays last
-        lines.insert(index, "*" + target)
+    dyndolod_block = getattr(preset, "DYNDOLOD_BLOCK", ()) or ()
+    lines = _apply_enable(lines, plugin, anchor, dyndolod_block)
     _write_raw(preset, bom, lines)
     after = read(preset)
     if not any(_name(l) == tname and l.startswith("*") for l in after):

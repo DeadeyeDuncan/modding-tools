@@ -525,6 +525,34 @@ def _post_full(args, preset, sec, run_dir, state):
         return 1
     warnings += ["forced past: " + p for p in trio_problems]
 
+    # Layer 1 -- Occlusion-last PRE-check (prevent before mutating): enable()
+    # stars a pre-existing trio line IN PLACE, it does NOT move it -- so the
+    # trio's real load-order position is whatever it was before `pre` ran
+    # (only a brand-new line is positioned via anchor). Simulate the exact
+    # enable() sequence below against the CURRENT Plugins.txt (`lines`, read
+    # above for masters-verify -- nothing has mutated it since) and refuse
+    # BEFORE deploying or enabling anything if Occlusion.esp would not land
+    # absolute last (e.g. a foreign plugin's line sits after the trio's
+    # existing position). No --force bypass: there is no legitimate reason
+    # to knowingly arm the wiki-bad state.
+    dyndolod_block = tuple(n.lower() for n in
+                           getattr(preset, "DYNDOLOD_BLOCK", ()) or ())
+    try:
+        sim_tail = simulate_trio_enable_tail(lines, trio, dyndolod_block)
+    except pluginstxt.PluginsTxtError as ex:
+        print(f"REFUSED: could not simulate the trio re-enable: {ex}")
+        print("Nothing deployed; trio left disabled; run stays pending.")
+        return 1
+    if sim_tail != [t.lower() for t in trio]:
+        print(f"REFUSED: Occlusion.esp will not be last -- enabling the "
+              f"trio at its current Plugins.txt position(s) would leave the "
+              f"tail as {sim_tail}, expected {[t.lower() for t in trio]}.")
+        print("A foreign plugin's line sits after the trio's existing "
+              "position in Plugins.txt -- fix order with `modkit plugins` "
+              "(never hand-edit), then re-run post. Nothing deployed; trio "
+              "left disabled; run stays pending.")
+        return 1
+
     rc = robocopy_tree(out, preset.DATA_DIR)
     if rc >= 8:
         print(f"DEPLOY FAILED: robocopy exit {rc} (>=8 = failure); trio not "
@@ -534,16 +562,34 @@ def _post_full(args, preset, sec, run_dir, state):
     write_list(Path(run_dir) / "deploy-dyndolod.txt", files)
 
     # trio re-enable: esm -> esp -> Occlusion, block LAST (wiki correction:
-    # Occlusion.esp absolute last, per dyndolod.info/Help/Occlusion-Data)
-    pluginstxt.enable(preset, trio[0], None)
-    pluginstxt.enable(preset, trio[1], trio[0])
-    pluginstxt.enable(preset, trio[2], trio[1])
+    # Occlusion.esp absolute last, per dyndolod.info/Help/Occlusion-Data).
+    # Layer 1 above already confirmed this SHOULD land Occlusion last -- the
+    # try/except and post-enable tail-verify here are Layer 2, a defense-in-
+    # depth backstop in case the simulation missed a case (e.g. Plugins.txt
+    # changed between the read above and now). Either failure re-disables
+    # the trio (pluginstxt.disable, never a raw traceback) so `post` never
+    # leaves it armed in a bad or half-armed order.
+    try:
+        pluginstxt.enable(preset, trio[0], None)
+        pluginstxt.enable(preset, trio[1], trio[0])
+        pluginstxt.enable(preset, trio[2], trio[1])
+    except pluginstxt.PluginsTxtError as ex:
+        print(f"REFUSED: trio enable failed: {ex}")
+        _rollback_trio(preset, trio)
+        print("Trio re-disabled (safe state). The DynDOLOD output is live "
+              "in Data but the trio was rolled back rather than left "
+              "half-armed -- fix Plugins.txt (`modkit plugins`) and re-run "
+              "post; run stays pending.")
+        return 1
     tail = enabled_plugins(pluginstxt.read(preset))[-3:]
     if tail != [t.lower() for t in trio]:
         print(f"TAIL VERIFY FAIL: last enabled plugins are {tail}, expected "
               f"{[t.lower() for t in trio]}.")
-        print("Fix the order with `modkit plugins` (never hand-edit), then "
-              "re-run post.")
+        _rollback_trio(preset, trio)
+        print("Trio re-disabled (safe state) -- Occlusion.esp was NOT last, "
+              "so the trio was rolled back rather than left armed. Fix the "
+              "order with `modkit plugins` (never hand-edit), then re-run "
+              "post; run stays pending.")
         return 1
 
     post_snap = pluginstxt.snapshot(preset, f"lodregen-post-{state['run_id']}")
@@ -793,6 +839,43 @@ def entry_manifest_path(game, name, ledger_dir):
 
 
 # ------------------------------------------------------------ plugin lines
+
+def simulate_trio_enable_tail(lines, trio, dyndolod_block=()):
+    """Pure dry run of the trio enable() sequence _post_full performs
+    (trio[0] -> anchor None, trio[1] -> anchor trio[0], trio[2] -> anchor
+    trio[1]) against a Plugins.txt `lines` list (as from pluginstxt.read()),
+    with NO file I/O. enable() stars a pre-existing line IN PLACE -- it does
+    NOT move it -- and only positions a brand-new line via the anchor, so a
+    naive "anchor means last" assumption is wrong for the common case (the
+    trio's lines already exist, disabled, from `pre`). This reuses
+    pluginstxt._apply_enable (the exact same placement code enable() calls)
+    instead of re-deriving the logic, so the simulation can never drift from
+    reality. Returns the last 3 entries of enabled_plugins() on the
+    simulated result -- callers compare that against the expected trio
+    order BEFORE deploying or enabling anything for real."""
+    sim = list(lines)
+    anchor = None
+    for name in trio:
+        sim = pluginstxt._apply_enable(sim, name, anchor, dyndolod_block)
+        anchor = name
+    return enabled_plugins(sim)[-3:]
+
+
+def _rollback_trio(preset, trio):
+    """Layer-2 rollback backstop: re-disable the trio to return Plugins.txt
+    to the safe pre-post state (Occlusion never left enabled-but-not-last).
+    Called when the real enable() sequence raises or the post-enable tail
+    verify fails -- either means Layer 1's pre-check missed a case (e.g.
+    Plugins.txt changed between the simulation and here). Swallows
+    PluginsTxtError per plugin (a name enable() never reached may have no
+    line at all yet -- first-ever regen) so the rollback itself can never
+    raise past main()."""
+    for name in trio:
+        try:
+            pluginstxt.disable(preset, name)
+        except pluginstxt.PluginsTxtError:
+            pass
+
 
 def enabled_plugins(lines):
     """Lowercased enabled plugin names, in order, from pluginstxt.read()

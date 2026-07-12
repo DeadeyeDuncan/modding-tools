@@ -818,6 +818,183 @@ def test_post_full_masters_fail_blocks_enable(tmp_path, monkeypatch, capsys):
     for name in trio:
         assert name.lower() not in enabled     # nothing was armed
     assert lodregen.pending_runs(env.sec["holding_root"]) != []  # still open
+    # Minor #3: masters-fail refuses BEFORE robocopy_tree runs at all -- none
+    # of the dyndolod output (trio plugins, or the dyndolod-only textures)
+    # landed in Data. gen_0..gen_4.dds already exist from the earlier texgen
+    # deploy (same relative names reused by fill_output) so check the trio
+    # files directly plus the indices only the dyndolod fill added (5..7).
+    for name in trio:
+        assert not (env.data / name).exists()
+    for i in range(5, 8):
+        assert not (env.data / "textures" / f"gen_{i}.dds").exists()
+
+
+def test_post_full_refuses_when_trio_would_not_end_last(tmp_path, monkeypatch, capsys):
+    """The Critical: Layer 1 pre-check. pluginstxt.enable() stars a
+    pre-existing trio line IN PLACE -- it does NOT move it -- so the trio's
+    real load-order position is whatever it was before `pre` ran. Realistic
+    trigger (from the brief): a foreign plugin gets appended (enabled) in
+    Plugins.txt AFTER Occlusion.esp's existing line between one post and the
+    next pre/post (e.g. hand-edited, or another tool ran). The old
+    reactive-only tail-verify let robocopy deploy the DynDOLOD output and
+    the trio get enabled NOT-last before it noticed -- the exact wiki-bad
+    state, with no rollback. Layer 1 must refuse BEFORE any of that."""
+    env = make_env(tmp_path, monkeypatch)
+    run_pre(env)
+    fill_output(env.sec, "texgen", 5)
+    assert lodregen.cmd_post(_post_args(stage="texgen"), cfg=env.cfg,
+                             preset=env.preset) == 0
+    trio = env.sec["trio"]
+    fill_output(env.sec, "dyndolod", 8, trio=trio, master_lists={
+        "DynDOLOD.esm": ["Skyrim.esm"],
+        "DynDOLOD.esp": ["Skyrim.esm", "DynDOLOD.esm"],
+        "Occlusion.esp": ["Skyrim.esm", "DynDOLOD.esm"],
+    })
+
+    from modkit import pluginstxt
+    lines_before = pluginstxt.read(env.preset)
+    assert lines_before[-1].lstrip("*").strip().lower() == "occlusion.esp"
+    # append a foreign ENABLED plugin after Occlusion's (disabled) line --
+    # Occlusion's own trio line still sits exactly where `pre` left it.
+    bom = env.plugins.read_bytes().startswith(b"\xef\xbb\xbf")
+    body = "\r\n".join(lines_before + ["*ForeignMod.esp"]) + "\r\n"
+    env.plugins.write_bytes((b"\xef\xbb\xbf" if bom else b"") + body.encode("utf-8"))
+
+    data_before = sorted(str(p.relative_to(env.data)).lower()
+                         for p in env.data.rglob("*") if p.is_file())
+
+    rc = lodregen.cmd_post(_post_args(), cfg=env.cfg, preset=env.preset)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "REFUSED" in out and "Occlusion.esp will not be last" in out
+
+    # Layer 1 prevention: NOTHING was deployed -- Data is byte-for-byte the
+    # same file set as before this post attempt (robocopy_tree never ran).
+    data_after = sorted(str(p.relative_to(env.data)).lower()
+                        for p in env.data.rglob("*") if p.is_file())
+    assert data_after == data_before
+    for name in trio:
+        assert not (env.data / name).exists()
+
+    # trio never left enabled-but-not-last (still disabled, untouched) and
+    # the run stays pending
+    enabled = lodregen.enabled_plugins(pluginstxt.read(env.preset))
+    for name in trio:
+        assert name.lower() not in enabled
+    pend = lodregen.pending_runs(env.sec["holding_root"])
+    assert len(pend) == 1
+    assert pend[0][1].get("post") is None
+
+
+def test_post_full_refuses_on_stale_dyndolod_output(tmp_path, monkeypatch, capsys):
+    """Minor #4 / freshness e2e: an empty/too-small DynDOLOD output must
+    refuse BEFORE anything is deployed to Data, driven end-to-end through
+    cmd_post/_post_full (mirrors test_post_texgen_stage_gates_then_deploys's
+    texgen-stage coverage, for the dyndolod/full stage)."""
+    env = make_env(tmp_path, monkeypatch)
+    run_pre(env)
+    fill_output(env.sec, "texgen", 5)
+    assert lodregen.cmd_post(_post_args(stage="texgen"), cfg=env.cfg,
+                             preset=env.preset) == 0
+    # dyndolod output left empty (well under min_output_files["dyndolod"]=5,
+    # trio plugins absent from it too)
+    fill_output(env.sec, "dyndolod", 1)
+
+    rc = lodregen.cmd_post(_post_args(), cfg=env.cfg, preset=env.preset)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "FRESHNESS FAIL" in out
+    assert "Nothing deployed" in out
+    for name in env.sec["trio"]:
+        assert not (env.data / name).exists()
+    pend = lodregen.pending_runs(env.sec["holding_root"])
+    assert len(pend) == 1
+    assert pend[0][1].get("post") is None
+
+
+def test_post_full_layer2_rollback_on_enable_error(tmp_path, monkeypatch, capsys):
+    """Layer 2 backstop, exception half: Layer 1 passes (a clean,
+    correctly-ordered Plugins.txt), but a raw pluginstxt.PluginsTxtError
+    raised mid-enable (e.g. a race where Plugins.txt changed between Layer
+    1's simulation and the real enable() calls) must be caught, the trio
+    rolled back to disabled, and refused cleanly -- never a raw traceback
+    after a deploy (the Important: main() does not catch PluginsTxtError)."""
+    env = make_env(tmp_path, monkeypatch)
+    run_pre(env)
+    fill_output(env.sec, "texgen", 5)
+    assert lodregen.cmd_post(_post_args(stage="texgen"), cfg=env.cfg,
+                             preset=env.preset) == 0
+    trio = env.sec["trio"]
+    fill_output(env.sec, "dyndolod", 8, trio=trio, master_lists={
+        "DynDOLOD.esm": ["Skyrim.esm"],
+        "DynDOLOD.esp": ["Skyrim.esm", "DynDOLOD.esm"],
+        "Occlusion.esp": ["Skyrim.esm", "DynDOLOD.esm"],
+    })
+
+    from modkit import pluginstxt
+    real_enable = pluginstxt.enable
+
+    def flaky_enable(preset, plugin, anchor):
+        if plugin == trio[2]:
+            raise pluginstxt.PluginsTxtError("simulated race: anchor vanished")
+        return real_enable(preset, plugin, anchor)
+    monkeypatch.setattr(lodregen.pluginstxt, "enable", flaky_enable)
+
+    rc = lodregen.cmd_post(_post_args(), cfg=env.cfg, preset=env.preset)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "REFUSED" in out and "simulated race" in out
+    assert "Traceback" not in out
+
+    enabled = lodregen.enabled_plugins(pluginstxt.read(env.preset))
+    for name in trio:
+        assert name.lower() not in enabled     # rolled back, not half-armed
+    pend = lodregen.pending_runs(env.sec["holding_root"])
+    assert len(pend) == 1
+    assert pend[0][1].get("post") is None
+
+
+def test_post_full_layer2_rollback_on_tail_mismatch(tmp_path, monkeypatch, capsys):
+    """Layer 2 backstop, the other half: even when all three enable() calls
+    succeed with no exception, if the resulting Plugins.txt tail somehow
+    does not end in the trio (a genuine race: something else got enabled
+    partway through the sequence, after Layer 1's simulation already ran)
+    the trio must be rolled back to disabled, never left half-armed."""
+    env = make_env(tmp_path, monkeypatch)
+    run_pre(env)
+    fill_output(env.sec, "texgen", 5)
+    assert lodregen.cmd_post(_post_args(stage="texgen"), cfg=env.cfg,
+                             preset=env.preset) == 0
+    trio = env.sec["trio"]
+    fill_output(env.sec, "dyndolod", 8, trio=trio, master_lists={
+        "DynDOLOD.esm": ["Skyrim.esm"],
+        "DynDOLOD.esp": ["Skyrim.esm", "DynDOLOD.esm"],
+        "Occlusion.esp": ["Skyrim.esm", "DynDOLOD.esm"],
+    })
+
+    from modkit import pluginstxt
+    real_enable = pluginstxt.enable
+
+    def flaky_enable(preset, plugin, anchor):
+        real_enable(preset, plugin, anchor)
+        if plugin == trio[2]:
+            # race: another actor enables a plugin right after Occlusion,
+            # between the real enable() sequence and the tail-verify read
+            real_enable(preset, "RaceCondition.esp", None)
+    monkeypatch.setattr(lodregen.pluginstxt, "enable", flaky_enable)
+
+    rc = lodregen.cmd_post(_post_args(), cfg=env.cfg, preset=env.preset)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "TAIL VERIFY FAIL" in out
+    assert "Trio re-disabled" in out
+
+    enabled = lodregen.enabled_plugins(pluginstxt.read(env.preset))
+    for name in trio:
+        assert name.lower() not in enabled     # rolled back, not half-armed
+    pend = lodregen.pending_runs(env.sec["holding_root"])
+    assert len(pend) == 1
+    assert pend[0][1].get("post") is None
 
 
 def test_post_full_refuses_without_texgen_deploy(tmp_path, monkeypatch, capsys):
