@@ -23,6 +23,22 @@ banner, no trailing summary line):
     list:   BSArch64.exe <archive.bsa> -list
     pack:   BSArch64.exe pack <folder> <archive.bsa> -sse
     unpack: BSArch64.exe unpack <archive.bsa> <folder>
+
+POSTMORTEM (Task 2 review, feat/forensics): the original `parse_bsarch_listing`
+gated BSArch's `-list` output through a hardcoded extension allowlist
+(`ASSET_EXTS`). BSArch's listing is authoritative — every line after the
+banner is a real archived path — so filtering it by extension silently
+dropped whole vanilla categories (e.g. `.strings`/`.dlstrings`/`.ilstrings` in
+`Skyrim - Interface.bsa`, `.btt`/`.lst` in `Skyrim - Meshes1.bsa`: 889 entries
+across 12 real Data\\ BSAs). Fixed by (1) keeping every path-shaped line
+regardless of extension — a line is a path iff, after stripping, it contains
+no ':' and fully matches "(segment\\/)+segment.ext" (the ':' exclusion is
+what keeps banner lines like "Archive Name: E:/.../Whatever.bsa" or the MPL
+license URL from being mistaken for entries — every genuine relative BSA
+path is colon-free, drive letters and URLs are not), and (2) cross-checking
+the parsed count against BSArch's own banner "Files: N" line, broadening the
+unpack+walk fallback to trigger on ANY mismatch (not just a fully-empty
+listing) so a future parsing gap is loud (a WARN + fallback), not silent.
 """
 import argparse
 import re
@@ -32,24 +48,44 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from forensics import _lib
 
-ASSET_EXTS = ("nif", "dds", "tri", "hkx", "wav", "fuz", "xwm", "pex", "psc",
-              "seq", "txt", "ini", "json", "swf", "gid", "lip", "btr", "bto",
-              "lod", "egm", "egt", "dlodsettings", "bgem", "bgsm", "dtl")
-
+# NOTE: no extension allowlist. BSArch's -list output is authoritative — every
+# line after the banner is a real archived path, whatever its extension. This
+# regex's job is only to tell a path line apart from banner/summary noise; it
+# must NOT gate on what kind of asset it is (that was the Task 2 review bug:
+# an old ASSET_EXTS allowlist here silently dropped 889 real entries across
+# 12 real Data\ BSAs). It is fullmatch'd (not search'd) against the whole
+# stripped line, and every character class excludes ':' — so any line with a
+# colon anywhere (BSArch's "Archive Name: ...", "Files: N", etc., and even
+# banner prose containing a "https://..." URL) can never fully match, without
+# needing a separate colon check. Genuine relative BSA paths never contain ':'.
 _PATH_RE = re.compile(
-    r"""(?P<path>(?:[^\\/:*?"<>|\r\n]+[\\/])+[^\\/:*?"<>|\r\n]+\.(?:%s))\s*$"""
-    % "|".join(ASSET_EXTS), re.IGNORECASE)
+    r"""(?P<path>(?:[^\\/:*?"<>|\r\n]+[\\/])+[^\\/:*?"<>|\r\n]+\.[^\\/:*?"<>|\r\n]+)""")
+
+# BSArch's -list banner reports a total, e.g. "         Files: 386". Used as a
+# completeness cross-check against the parsed path count (see list_bsa).
+_FILES_COUNT_RE = re.compile(r"^\s*Files:\s*(\d+)\s*$", re.IGNORECASE | re.MULTILINE)
 
 
 def parse_bsarch_listing(text):
-    """Keep lines that end in a relative asset path; drop banner/summary noise.
-    The tiny-BSA round-trip test is the authority that this parse is complete."""
+    """Keep every path-shaped line (see _PATH_RE); drop banner/summary noise.
+    No extension filtering — BSArch's -list output is authoritative for
+    whatever it lists. The extended tiny-BSA round-trip test (mixed
+    extensions, some outside the old ASSET_EXTS set) is the authority that
+    this parse is complete; list_bsa's banner-count cross-check is the
+    authority for real-world archives this test doesn't cover."""
     out = []
     for line in text.splitlines():
-        m = _PATH_RE.search(line.strip())
+        m = _PATH_RE.fullmatch(line.strip())
         if m:
             out.append(_lib.norm_rel(m.group("path")))
     return out
+
+
+def parse_banner_file_count(text):
+    """Extract BSArch's own 'Files: N' banner total, or None if absent
+    (e.g. malformed/non-BSArch output) — see list_bsa's cross-check."""
+    m = _FILES_COUNT_RE.search(text)
+    return int(m.group(1)) if m else None
 
 
 def bsarch_list_cmd(bsarch, bsa_path):
@@ -65,15 +101,29 @@ def bsarch_unpack_cmd(bsarch, bsa_path, folder):
 
 
 def list_bsa(bsarch, bsa_path, tmp_root):
-    """List one BSA. Primary: BSArch listing. Fallback (still BSArch-only,
-    correct by construction, slow): unpack to a temp dir and walk it."""
+    """List one BSA. Primary: BSArch listing, cross-checked against BSArch's
+    own 'Files: N' banner count so a parse gap is loud (WARN + fallback), not
+    silent. Fallback (still BSArch-only, correct by construction, slow):
+    unpack to a temp dir and walk it — triggered by an empty listing OR a
+    parsed-count/banner-count mismatch (previously only the fully-empty case
+    triggered it, which is how the old ASSET_EXTS bug went undetected on
+    mixed-extension archives: only the one archive that was 100% non-listed
+    extensions ever hit the fallback)."""
     rc, text = _lib.run(bsarch_list_cmd(bsarch, bsa_path))
     paths = parse_bsarch_listing(text)
-    if paths:
+    banner_count = parse_banner_file_count(text)
+    mismatch = banner_count is not None and len(paths) != banner_count
+    if paths and not mismatch:
         return paths
-    _lib.say("  listing yielded no paths (rc=%d) - falling back to unpack+walk "
-             "for %s (fix bsarch_list_cmd per usage text if this persists)"
-             % (rc, Path(bsa_path).name))
+    if mismatch:
+        _lib.say("  WARN: %s parsed %d path(s) but BSArch banner says "
+                 "Files: %d (delta %d) - falling back to unpack+walk"
+                 % (Path(bsa_path).name, len(paths), banner_count,
+                    banner_count - len(paths)))
+    else:
+        _lib.say("  listing yielded no paths (rc=%d) - falling back to unpack+walk "
+                 "for %s (fix bsarch_list_cmd per usage text if this persists)"
+                 % (rc, Path(bsa_path).name))
     out = Path(tmp_root) / ("bsa-unpack-" + Path(bsa_path).stem)
     out.mkdir(parents=True, exist_ok=True)
     rc, text = _lib.run(bsarch_unpack_cmd(bsarch, bsa_path, out))
@@ -122,9 +172,17 @@ def contains(index, rel):
 
 
 def dir_prefixes(index):
-    """Every directory prefix present in any BSA — the mod-specific-path signal:
-    a miss under a prefix NO BSA carries cannot have a BSA fallback (wiki:
-    the only fully reliable genuine-hole signal)."""
+    """Every directory prefix BSArch's -list output reports for any BSA — the
+    mod-specific-path signal: a miss under a prefix no BSA's authoritative
+    listing carries cannot have a BSA-listing fallback.
+
+    This reflects BSArch's own -list output exactly (as of the Task 2 review
+    fix: no extension filter narrows it anymore, so e.g. 'strings\\' now
+    appears here whenever a BSA lists .strings files). It is NOT a claim that
+    every real archived path is covered: BSArch's -list itself rarely omits
+    a genuine entry (e.g. sack01.nif is byte-present in Skyrim - Meshes1.bsa
+    but never appears in its own -list output) — raw_confirm is the backstop
+    for that gap, not this function."""
     out = set()
     for paths in index["bsas"].values():
         for p in paths:

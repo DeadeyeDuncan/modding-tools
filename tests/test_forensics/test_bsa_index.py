@@ -66,8 +66,17 @@ class TestRawConfirm(unittest.TestCase):
     def test_raw_confirm_straddles_chunk_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
             bsa = Path(tmp) / "fake.bsa"
-            bsa.write_bytes(b"A" * 100 + b"needle.nif" + b"B" * 100)
+            needle = b"needle.nif"  # 10 bytes
+            # With chunk=64, a 60-byte prefix puts the boundary at byte 64,
+            # which falls INSIDE the needle (bytes 60-69) - 4 bytes ("need")
+            # land in the first chunk and the remaining 6 ("le.nif") land in
+            # the second, so this only passes if the carry-over logic really
+            # stitches chunk boundaries back together (the old fixture placed
+            # the needle at offset 100, entirely inside the second chunk, so
+            # it never exercised the carry-over at all).
+            bsa.write_bytes(b"A" * 60 + needle + b"B" * 100)
             self.assertTrue(bsa_index.raw_confirm(str(bsa), "needle.nif", chunk=64))
+            self.assertFalse(bsa_index.raw_confirm(str(bsa), "nomatch.nif", chunk=64))
 
 
 @unittest.skipUnless(os.path.isfile(BSARCH), "BSArch not installed on this machine")
@@ -78,10 +87,18 @@ class TestRealBsaRoundTrip(unittest.TestCase):
     returns exactly that set."""
 
     def test_pack_then_list_matches_loose_set(self):
+        # Deliberately mixes extensions OUTSIDE the old ASSET_EXTS allowlist
+        # (.strings, .btt) with ones that WERE on it (.nif, .dds). This is
+        # the fixture that would have caught the Task 2 review bug: an
+        # extension allowlist gating BSArch's own authoritative -list output
+        # silently dropped 889 real entries (.strings/.dlstrings/.ilstrings,
+        # .btt/.lst, ...) across 12 real Data\ BSAs.
         with tempfile.TemporaryDirectory() as tmp:
             loose = Path(tmp) / "loose"
             expected = ["meshes\\fixture\\a.nif",
                         "meshes\\fixture\\sub\\b.nif",
+                        "meshes\\terrain\\fixture.btt",
+                        "strings\\fixture_english.strings",
                         "textures\\fixture\\c.dds"]
             for rel in expected:
                 p = loose / rel
@@ -93,8 +110,11 @@ class TestRealBsaRoundTrip(unittest.TestCase):
             self.assertTrue(out_bsa.is_file(), "pack produced no archive:\n" + text)
 
             paths = bsa_index.list_bsa(BSARCH, str(out_bsa), tmp_root=tmp)
+            self.assertEqual(len(paths), len(expected),
+                             "listing count does not match packed loose set")
             self.assertEqual(sorted(paths), expected,
-                             "listing does not match packed loose set")
+                             "listing does not match packed loose set (extensions "
+                             "outside the old ASSET_EXTS allowlist must round-trip too)")
 
     def test_raw_confirm_on_real_bsa(self):
         with tempfile.TemporaryDirectory() as tmp:
