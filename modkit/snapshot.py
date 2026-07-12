@@ -79,3 +79,144 @@ def atomic_write(path, text):
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+# --------------------------------------------------------------------------
+# Valve KeyValues (.acf) - minimal text parser for Steam appmanifests
+# --------------------------------------------------------------------------
+
+def _acf_tokens(text):
+    """Yield (token, is_string) - is_string False only for '{' / '}'.
+
+    Handles quoted strings with \\" \\\\ \\n \\t escapes, bare tokens,
+    and // line comments.
+    """
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in " \t\r\n":
+            i += 1
+            continue
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j == -1 else j + 1
+            continue
+        if c in "{}":
+            yield c, False
+            i += 1
+            continue
+        if c == '"':
+            out = []
+            i += 1
+            while i < n and text[i] != '"':
+                if text[i] == "\\" and i + 1 < n:
+                    esc = text[i + 1]
+                    out.append({"n": "\n", "t": "\t", '"': '"', "\\": "\\"}.get(esc, esc))
+                    i += 2
+                else:
+                    out.append(text[i])
+                    i += 1
+            i += 1  # closing quote
+            yield "".join(out), True
+            continue
+        j = i
+        while j < n and text[j] not in ' \t\r\n"{}':
+            j += 1
+        yield text[i:j], True
+        i = j
+
+
+def parse_acf(text):
+    """Minimal Valve KeyValues (.acf/.vdf text) parser -> nested dict.
+
+    Grammar: `key value` pairs and `key { ... }` blocks, keys/values quoted
+    or bare. Duplicate keys: last one wins. Raises ValueError on unbalanced
+    braces or a dangling key.
+    """
+    root = {}
+    stack = [root]
+    key = None
+    for tok, is_str in _acf_tokens(text):
+        if not is_str and tok == "{":
+            if key is None:
+                raise ValueError("acf: '{' with no preceding key")
+            child = {}
+            stack[-1][key] = child
+            stack.append(child)
+            key = None
+        elif not is_str and tok == "}":
+            if key is not None:
+                raise ValueError(f"acf: dangling key {key!r} before '}}'")
+            if len(stack) == 1:
+                raise ValueError("acf: unbalanced '}'")
+            stack.pop()
+        elif key is None:
+            key = tok
+        else:
+            stack[-1][key] = tok
+            key = None
+    if len(stack) != 1:
+        raise ValueError("acf: unclosed '{'")
+    if key is not None:
+        raise ValueError(f"acf: dangling key {key!r} at end of input")
+    return root
+
+
+def acf_get(d, *path):
+    """Case-insensitive nested lookup; None when any hop is missing."""
+    cur = d
+    for name in path:
+        if not isinstance(cur, dict):
+            return None
+        found = None
+        for k, v in cur.items():
+            if k.lower() == name.lower():
+                found = v
+        if found is None:
+            return None
+        cur = found
+    return cur
+
+
+AUTOUPDATE_MEANING = {
+    "0": "always keep this game updated - DANGEROUS for modded games",
+    "1": "only update this game when I launch it",
+    "2": "high priority auto-update - DANGEROUS for modded games",
+}
+
+
+def capture_steam(snap_cfg):
+    """Read AutoUpdateBehavior from the configured appmanifest.
+
+    Returns (section_dict_or_None, warnings). None section = not configured.
+    Any behavior other than "1" is a WARNING: an unattended Steam update
+    breaks loader chains (RDR2 was 10 hours from exactly this, 2026-07-01).
+    """
+    path = snap_cfg.get("appmanifest")
+    if not path:
+        return None, []
+    want_id = snap_cfg.get("steamAppId")
+    section = {"appmanifest": str(path), "appId": None, "autoUpdateBehavior": None}
+    text = read_text(path)
+    if text is None:
+        return section, [f"appmanifest not found: {path}"]
+    try:
+        acf = parse_acf(text)
+    except ValueError as ex:
+        return section, [f"appmanifest unparseable: {path}: {ex}"]
+    section["appId"] = acf_get(acf, "AppState", "appid")
+    behavior = acf_get(acf, "AppState", "AutoUpdateBehavior")
+    section["autoUpdateBehavior"] = behavior
+    warnings = []
+    if want_id is not None and section["appId"] is not None \
+            and str(want_id) != str(section["appId"]):
+        warnings.append(f"appmanifest appid {section['appId']} != configured "
+                        f"steamAppId {want_id} - wrong manifest path in modkit.json?")
+    if behavior != "1":
+        meaning = AUTOUPDATE_MEANING.get(behavior or "", "unknown value")
+        warnings.append(
+            f"Steam AutoUpdateBehavior={behavior!r} ({meaning}) - must be 1 "
+            f"('only update when I launch'): an unattended auto-update can break "
+            f"the loader chain (RDR2 near-miss 2026-07-01). "
+            f"Fix in Steam > Properties > Updates.")
+    return section, warnings
