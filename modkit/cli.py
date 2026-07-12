@@ -315,6 +315,52 @@ def register_dllvet(sub, common):
     sp.set_defaults(func=cmd_dllvet)
 
 
+def cmd_plugins(args):
+    from modkit import pluginstxt
+    preset = _preset(args)
+    try:
+        if args.action == "list":
+            for line in pluginstxt.read(preset):
+                safe_print(line)
+            return 0
+        if args.action == "snapshot":
+            safe_print(f"snapshot: {pluginstxt.snapshot(preset, args.tag)}")
+            return 0
+        if args.action == "diff":
+            if len(args.paths) != 2:
+                safe_print("ERROR: diff needs two paths: "
+                           "modkit plugins diff <snapshot> <snapshot-or-live>")
+                return 1
+            safe_print(pluginstxt.diff(args.paths[0], args.paths[1]))
+            return 0
+        if not args.plugin:
+            safe_print(f"ERROR: {args.action} needs --plugin <Name.esp>")
+            return 1
+        if args.action == "enable":
+            pluginstxt.enable(preset, args.plugin, args.anchor)
+            safe_print(f"enabled: {args.plugin}")
+        else:
+            pluginstxt.disable(preset, args.plugin)
+            safe_print(f"disabled: {args.plugin}")
+        return 0
+    except pluginstxt.PluginsTxtError as ex:
+        safe_print(f"ERROR: {ex}")
+        return 1
+
+
+def register_plugins(sub, common):
+    sp = sub.add_parser("plugins", parents=[common],
+                        help="Plugins.txt manager: list | enable | disable | "
+                             "snapshot | diff (BOM/CRLF-safe, DynDOLOD block stays last)")
+    sp.add_argument("action", choices=["list", "enable", "disable", "snapshot", "diff"])
+    sp.add_argument("paths", nargs="*", help="diff: two snapshot/live paths")
+    sp.add_argument("--plugin", default=None, help="plugin filename for enable/disable")
+    sp.add_argument("--anchor", default=None,
+                    help="enable: insert after this plugin (case-insensitive)")
+    sp.add_argument("--tag", default="manual", help="snapshot tag (default: manual)")
+    sp.set_defaults(func=cmd_plugins)
+
+
 def _preset(args):
     cfg = config.load(getattr(args, "config", None))
     game = getattr(args, "game", None)
@@ -350,6 +396,7 @@ def _register_all(sub, common):
     register_fomod(sub, common)
     register_esp(sub, common)
     register_dllvet(sub, common)
+    register_plugins(sub, common)
 
 
 def main(argv=None):
