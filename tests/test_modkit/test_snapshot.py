@@ -623,3 +623,58 @@ def test_cmd_diff_backstop_catches_unforeseen_capture_exception(tmp_path, monkey
     assert rc == 1
     assert "Traceback" not in out
     assert "ERROR: snapshot capture failed: boom" in out
+
+
+# ---------------------------------------------------------------- Task 7
+
+HAND_EDITED = """# Open Items - skyrim
+
+## Open
+
+- [ ] 2026-07-01 - iTexMipMapSkip=1 decision pending
+- [x] 2026-07-01 - BTPS config restored (done, wrong section by hand)
+some prose note the user typed
+* [ ] star-bullet item added by hand
+
+## Completed
+
+- [X] 2026-06-30 - Bashed Patch rebuilt (done 2026-07-01)
+"""
+
+
+def test_parse_tolerant_checkbox_authority():
+    doc = snapshot.parse_open_items(HAND_EDITED)
+    # the checkbox mark decides, not the heading the line sits under
+    assert doc["open"] == ["2026-07-01 - iTexMipMapSkip=1 decision pending",
+                           "star-bullet item added by hand"]
+    assert doc["done"] == [
+        "2026-07-01 - BTPS config restored (done, wrong section by hand)",
+        "2026-06-30 - Bashed Patch rebuilt (done 2026-07-01)"]
+    assert doc["notes"] == ["some prose note the user typed"]
+
+
+def test_parse_empty_or_missing_text():
+    assert snapshot.parse_open_items("") == {"open": [], "done": [], "notes": []}
+    assert snapshot.parse_open_items(None) == {"open": [], "done": [], "notes": []}
+
+
+def test_render_canonical():
+    doc = {"open": ["a"], "done": ["b (done 2026-07-11)"], "notes": ["n"]}
+    text = snapshot.render_open_items(doc, "skyrim")
+    assert text.startswith("# Open Items - skyrim\n")
+    assert "## Open\n\n- [ ] a" in text
+    assert "## Completed\n\n- [x] b (done 2026-07-11)" in text
+    assert "## Notes\n\nn" in text
+
+
+def test_render_empty_sections_use_placeholder():
+    text = snapshot.render_open_items({"open": [], "done": [], "notes": []}, "cp77")
+    assert text.count("(none)") == 2
+
+
+def test_roundtrip_stable():
+    doc = snapshot.parse_open_items(HAND_EDITED)
+    text1 = snapshot.render_open_items(doc, "skyrim")
+    doc2 = snapshot.parse_open_items(text1)
+    assert doc2 == doc                       # nothing lost, nothing duplicated
+    assert snapshot.render_open_items(doc2, "skyrim") == text1  # fixpoint

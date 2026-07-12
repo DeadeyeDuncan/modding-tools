@@ -652,3 +652,52 @@ def register(sub):
     d.add_argument("--game", required=True, help="skyrim | cp77")
     d.add_argument("--against", help="explicit snapshot .json (default: latest)")
     d.set_defaults(func=cmd_diff)
+
+
+# --------------------------------------------------------------------------
+# open-items tracker (C:\Modding\<game>-manual\open-items.md)
+# --------------------------------------------------------------------------
+
+_ITEM_RE = re.compile(r"^\s*[-*]\s*\[(?P<mark>[ xX])\]\s*(?P<body>.*\S)\s*$")
+
+
+def parse_open_items(text):
+    """Tolerant parse of open-items.md -> {"open", "done", "notes"} lists.
+
+    Authority is the checkbox mark, not the heading: any '- [ ]' line
+    anywhere counts as open and any '- [x]' as completed, so hand-added
+    items in the wrong section still round-trip correctly. Blank lines,
+    headings ('#...'), and '(none)' placeholders are layout and dropped;
+    every other non-blank line is preserved verbatim under notes.
+    """
+    doc = {"open": [], "done": [], "notes": []}
+    for line in (text or "").split("\n"):
+        m = _ITEM_RE.match(line)
+        if m:
+            bucket = "done" if m.group("mark") in "xX" else "open"
+            doc[bucket].append(m.group("body"))
+            continue
+        s = line.strip()
+        if not s or s.startswith("#") or s == "(none)":
+            continue
+        doc["notes"].append(s)
+    return doc
+
+
+def render_open_items(doc, game):
+    """Canonical open-items.md text. Human-editable; reparsed tolerantly."""
+    out = [f"# Open Items - {game}", "", "## Open", ""]
+    if doc["open"]:
+        out += [f"- [ ] {b}" for b in doc["open"]]
+    else:
+        out.append("(none)")
+    out += ["", "## Completed", ""]
+    if doc["done"]:
+        out += [f"- [x] {b}" for b in doc["done"]]
+    else:
+        out.append("(none)")
+    if doc["notes"]:
+        out += ["", "## Notes", ""]
+        out += doc["notes"]
+    out.append("")
+    return "\n".join(out)
