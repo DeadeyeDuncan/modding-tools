@@ -23,7 +23,7 @@ import struct
 import subprocess
 from pathlib import Path
 
-from modkit import config, ledger_bridge, pluginstxt
+from modkit import config, deploy, ledger_bridge, pluginstxt
 
 
 class LodregenError(Exception):
@@ -155,7 +155,165 @@ def cmd_status(args, cfg=None):
 # ------------------------------------------------------------ CLI wiring
 
 def cmd_pre(args, cfg=None, preset=None):
-    raise LodregenError("cmd_pre is implemented in Task 4 of the lodregen plan")
+    cfg = cfg if cfg is not None else config.load()
+    preset = preset if preset is not None else config.game(cfg, args.game)
+    sec = section(cfg, args.game)
+    warnings = []
+
+    pending = pending_runs(sec["holding_root"])
+    if pending and not args.force:
+        ids = ", ".join(s["run_id"] for _d, s in pending)
+        print(f"REFUSED: pending regen run(s) exist: {ids}")
+        print("Finish with `modkit lodregen post` (see `modkit lodregen "
+              "status`), or --force to start a new bracket anyway.")
+        return 1
+
+    # game/tool-process check mirrors deploy.game_running's 3-state contract:
+    # confirmed-running is a hard refusal (no --force), an unverifiable
+    # tasklist warns and refuses UNLESS --force, only a clean read proceeds.
+    try:
+        procs = running_processes(list(preset.PROCESS_NAMES)
+                                  + list(sec["tool_processes"]))
+    except deploy.GameStateUnknown as ex:
+        if not args.force:
+            print(f"WARN: could not verify the game/tool processes are "
+                  f"closed: {ex}")
+            print("Rerun with --force if you are sure everything is closed.")
+            return 2
+        print(f"WARN: could not verify the game/tool processes are closed: "
+              f"{ex}; proceeding because --force was given")
+        procs = []
+    if procs:
+        print("REFUSED: process(es) running: " + ", ".join(procs))
+        print("Close them (game AND generator GUIs) before bracketing a regen.")
+        return 1
+
+    # tool pre-flight (kills the exit-fix-relaunch loop before any GUI opens)
+    tools = sec["tools"]
+    need = ["texgen_exe", "dyndolod_exe"] + ([] if args.no_pgpatcher
+                                             else ["pgpatcher_exe"])
+    missing_tools = [k for k in need if not Path(tools[k]).is_file()]
+    if missing_tools and not args.force:
+        for k in missing_tools:
+            print(f"REFUSED: tool exe missing: {k} = {tools[k]}")
+        print("Fix modkit.json lodregen paths (or install the tool); "
+              "--force to bracket anyway.")
+        return 1
+    warnings += [f"tool exe missing (forced past): {tools[k]}"
+                 for k in missing_tools]
+
+    ini = Path(tools["dyndolod_ini"])
+    if ini.is_file():
+        for line in ini.read_text(encoding="utf-8",
+                                  errors="replace").splitlines():
+            if line.strip().lower().startswith("wizard="):
+                if line.strip().lower() != "wizard=0":
+                    warnings.append(
+                        f"DynDOLOD_SSE.ini has '{line.strip()}' -- Advanced "
+                        f"mode (Wizard=0) is required for the Grass LOD "
+                        f"checkbox")
+                break
+    else:
+        warnings.append(f"DynDOLOD_SSE.ini not found at {ini}")
+
+    for marker in sec["ng_markers"]:
+        if not (Path(preset.DATA_DIR) / marker).is_file():
+            warnings.append(f"NG/Resources marker missing under Data: {marker} "
+                            f"(DLL NG / Resources install broken? no-clobber "
+                            f"restore from {sec['resources_staging']})")
+
+    diff_json = Path(preset.DATA_DIR) / "ParallaxGen_Diff.json"
+    if diff_json.is_file():
+        age = datetime.datetime.fromtimestamp(
+            diff_json.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        if args.no_pgpatcher:
+            warnings.append(
+                f"Data\\ParallaxGen_Diff.json present (mtime {age}) but this "
+                f"is a --no-pgpatcher run -- renaming it to .bak is the "
+                f"cleaner play (wiki 2026-06-21); stale entries are harmless "
+                f"if left")
+        else:
+            warnings.append(
+                f"Data\\ParallaxGen_Diff.json present (mtime {age}) -- the "
+                f"PGPatcher run will regenerate it; post checks freshness")
+
+    # ---- bracket opens: state dir, snapshot, trio down, guarded clean ----
+    try:
+        run_dir, state = new_run(sec, args.game)
+    except FileExistsError:
+        print("REFUSED: a regen run already claims this second's run-id "
+              "under " + sec["holding_root"] + " -- try again in a moment.")
+        return 1
+    stamp = _now()
+    snapshot = pluginstxt.snapshot(preset, f"lodregen-pre-{state['run_id']}")
+
+    trio_dir = run_dir / "trio"
+    trio_dir.mkdir()
+    moved, absent = [], []
+    for name in sec["trio"]:
+        pluginstxt.disable(preset, name)
+        src = Path(preset.DATA_DIR) / name
+        if src.is_file():
+            shutil.move(str(src), str(trio_dir / name))
+            moved.append(name)
+        else:
+            absent.append(name)
+    if absent:
+        warnings.append("trio file(s) not in Data (first regen, or already "
+                        "pulled): " + ", ".join(absent))
+
+    clean = {"moved": [], "protected": [], "missing": [], "skipped": []}
+    targets = [("dyndolod", True), ("texgen", bool(args.clean_texgen))]
+    for key, do_clean in targets:
+        prefix = sec["ledger_prefixes"][key]
+        if not do_clean:
+            clean["skipped"].append(
+                f"{key}: not cleaned (wiki 2026-06-25: never pre-clean "
+                f"TexGen; --clean-texgen to override)")
+            continue
+        entry = active_output_entry(args.game, prefix)
+        if entry is None:
+            warnings.append(f"no active ledger entry matching {prefix!r} -- "
+                            f"skipping {key} clean (nothing manifest-tracked)")
+            continue
+        mpath = entry_manifest_path(args.game, entry, sec["ledger_dir"])
+        if mpath is None or not mpath.is_file():
+            warnings.append(f"ledger entry {entry!r} has no readable manifest "
+                            f"-- skipping {key} clean")
+            continue
+        rep = guarded_clean(preset.DATA_DIR, read_lines_bomsafe(mpath),
+                            sec["protected_inputs"], run_dir / "quarantine")
+        for k in ("moved", "protected", "missing"):
+            clean[k] += [f"{key}: {p}" for p in rep[k]]
+
+    state["pre"] = {
+        "stamp": stamp.isoformat(timespec="seconds"),
+        "epoch": stamp.timestamp(),
+        "plugins_snapshot": str(snapshot),
+        "trio_moved": moved,
+        "trio_absent": absent,
+        "no_pgpatcher": bool(args.no_pgpatcher),
+        "clean": {"quarantined": len(clean["moved"]),
+                  "protected_skipped": clean["protected"],
+                  "missing": clean["missing"],
+                  "skipped": clean["skipped"]},
+        "warnings": warnings,
+    }
+    save_state(run_dir, state)
+
+    print(f"lodregen pre complete -- run {state['run_id']}  ({run_dir})")
+    print(f"  Plugins.txt snapshot: {snapshot}")
+    print(f"  trio pulled to {trio_dir}: {', '.join(moved) or 'none'}")
+    print(f"  quarantined {len(clean['moved'])} old output file(s) -> "
+          f"{run_dir / 'quarantine'}")
+    for p in clean["protected"]:
+        print(f"  PROTECTED (kept; the manifest is polluted -- re-author it "
+              f"from actual tool output): {p}")
+    for w in warnings:
+        print(f"  WARN: {w}")
+    print()
+    print(gui_sequence(sec, args.game, args.no_pgpatcher, preset.DATA_DIR))
+    return 2 if warnings else 0
 
 
 def cmd_post(args, cfg=None, preset=None):
@@ -287,3 +445,128 @@ def guarded_clean(data_dir, manifest_lines, patterns, quarantine_dir):
         shutil.move(str(src), str(dst))
 
     return report
+
+
+# ------------------------------------------------------------ processes
+
+def running_processes(names, csv_text=None):
+    """Which of `names` are live? Parses `tasklist /FO CSV /NH` (injectable
+    for tests via csv_text). Raises deploy.GameStateUnknown if tasklist
+    itself could not be queried (launch failure, nonzero exit, empty/
+    unusable output) -- mirrors deploy.game_running's 3-state contract:
+    callers must NOT treat "could not verify" as "nothing running"."""
+    if csv_text is None:
+        try:
+            p = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
+                               capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+        except OSError as ex:
+            raise deploy.GameStateUnknown(str(ex)) from ex
+        if p.returncode != 0:
+            raise deploy.GameStateUnknown(
+                f"tasklist exited {p.returncode}: "
+                f"{(p.stderr or '').strip()[:200]}")
+        csv_text = p.stdout or ""
+        if not csv_text.strip():
+            raise deploy.GameStateUnknown("tasklist produced no output")
+    live = set()
+    for line in csv_text.splitlines():
+        if line.startswith('"'):
+            live.add(line.split('","')[0].strip('"').lower())
+    return [n for n in names if n.lower() in live]
+
+
+# ------------------------------------------------------------ ledger lookups
+
+def active_output_entry(game, prefix):
+    """Name of the active ledger entry for an output family, or None.
+    Matches `<prefix>` exactly or the dated form `<prefix> (regen ...)`.
+    ledger.py `list` prints `_entry_line` fields joined by two spaces, so
+    the name is everything before the first double-space."""
+    rc, out = ledger_bridge.run(["list", "--active", "--game", game])
+    if rc != 0:
+        return None
+    for line in out.splitlines():
+        name = line.split("  ", 1)[0].strip()
+        if name == prefix or name.startswith(prefix + " ("):
+            return name
+    return None
+
+
+def entry_manifest_path(game, name, ledger_dir):
+    """Absolute path of an entry's manifest file (ledger.py `get` prints the
+    entry as JSON; the `manifest` field is relative to the ledger dir)."""
+    rc, out = ledger_bridge.run(["get", "--game", game, "--name", name])
+    if rc != 0:
+        return None
+    ptr = json.loads(out).get("manifest")
+    return (Path(ledger_dir) / ptr) if ptr else None
+
+
+# ------------------------------------------------------------ plugin lines
+
+def enabled_plugins(lines):
+    """Lowercased enabled plugin names, in order, from pluginstxt.read()
+    lines ('*' prefix = enabled; SSE Plugins.txt convention). Pulled forward
+    from Task 5 (verbatim) because Task 4's own tests need it -- lodregen
+    never writes Plugins.txt lines itself, only reads via this helper."""
+    out = []
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("*"):
+            out.append(s[1:].strip().lower())
+    return out
+
+
+# ------------------------------------------------------------ GUI ritual
+
+def gui_sequence(sec, game, no_pgpatcher, data_dir):
+    t = sec["tools"]
+    lines = [
+        "=== MANUAL GUI SESSION -- Claude must NEVER launch, drive, click, or",
+        "    screenshot these tools. Config-file-first; the USER double-clicks",
+        "    each exe (program-launched windows can open off-screen -- wiki",
+        "    2026-06-28). Verify disk artifacts after every GUI run. ===",
+        "",
+    ]
+    step = 1
+    if not no_pgpatcher:
+        lines += [
+            f"{step}) PGPatcher -- USER launches: {t['pgpatcher_exe']}",
+            "   - Before Start: check <PGPatcher>\\cfg\\settings.json -- output dir",
+            "     OUTSIDE Data, Mod Manager = None, no leading TAB in the output",
+            "     path (wiki 2026-06-20 gotcha).",
+            "   - The 'DynDOLOD and TexGen outputs must be disabled' abort cannot",
+            "     fire now (pre pulled the trio).",
+            "   - Abort 'PGPatcher meshes exist in your data directory' = an old",
+            "     bake is still deployed. STOP -- that is per-mesh-revert",
+            "     territory (runbook), never bulk-delete baked meshes.",
+            "   - When it finishes, deploy the output into Data BEFORE TexGen:",
+            f"     robocopy \"{sec['outputs']['pgpatcher']}\" \"{data_dir}\" /E",
+            "     (robocopy exit <8 = success)",
+            "",
+        ]
+        step += 1
+    lines += [
+        f"{step}) TexGen -- USER launches: {t['texgen_exe']}",
+        "   - 'Found stitched object LOD textures ... installed in game folder'",
+        "     warning -> click IGNORE. It is HARMLESS; TexGen overwrites its own",
+        "     output. NEVER pre-clean to silence it (the cleaning WAS the",
+        "     recurring failure -- wiki supersede 2026-06-25).",
+        f"   - When TexGen exits, run:  modkit lodregen post --game {game} --stage texgen",
+        "     (freshness-gates + deploys TexGen_Output; DynDOLOD must read the",
+        "      DEPLOYED textures, not the output folder)",
+        "",
+        f"{step + 1}) DynDOLOD -- USER launches: {t['dyndolod_exe']}",
+        "   - Advanced mode (pre checked Wizard=0). Select ALL worldspaces --",
+        "     the selection can RESET between runs (wiki gotcha).",
+        "   - Grass LOD: tick it and set Grass LOD Mode to MATCH GrassControl.ini",
+        "     (this build: Mode 1; a mismatch or GUI-left-at-0 = no/seamed grass",
+        "     LOD). Hover the checkbox to confirm it found the .cgid cache.",
+        "   - 'Deleted large references found' hard-stop = DLC masters need",
+        "     xEdit QuickAutoClean copies restored (runbook).",
+        f"   - When DynDOLOD exits, run:  modkit lodregen post --game {game}",
+        "     (freshness gate, masters verify, deploy, trio re-enable",
+        "      esm -> esp -> Occlusion LAST, Plugins.txt diff, ledger record)",
+    ]
+    return "\n".join(lines)

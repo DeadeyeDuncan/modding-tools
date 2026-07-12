@@ -12,6 +12,21 @@ import pytest
 from modkit import lodregen
 
 
+def make_tes4(masters, esl=False):
+    """Minimal valid SSE plugin: a TES4 record with HEDR + MAST/DATA pairs.
+    Header: sig(4) dataSize(4) flags(4) formid(4) vc(4) version(2) unk(2).
+    Defined here (not in Task 5) so Task 4's tests are self-contained --
+    it is pure struct-packing, no game data."""
+    subs = b"HEDR" + struct.pack("<H", 12) + struct.pack("<fII", 1.71, 0, 0x800)
+    for m in masters:
+        name = m.encode("cp1252") + b"\x00"
+        subs += b"MAST" + struct.pack("<H", len(name)) + name
+        subs += b"DATA" + struct.pack("<H", 8) + b"\x00" * 8
+    flags = 0x200 if esl else 0
+    return (b"TES4" + struct.pack("<IIII", len(subs), flags, 0, 0)
+            + struct.pack("<HH", 44, 0) + subs)
+
+
 # ---------------------------------------------------------------- fixtures
 
 def fixture_section(tmp_path):
@@ -315,3 +330,219 @@ def test_read_lines_bomsafe(tmp_path):
     f = tmp_path / "m.txt"
     f.write_bytes(b"\xef\xbb\xbf" + b"a.dds\r\nb.dds\r\n\r\n")
     assert lodregen.read_lines_bomsafe(f) == ["a.dds", "b.dds"]
+
+
+# ---------------------------------------------------------------- Task 4
+
+TASKLIST_IDLE = ('"svchost.exe","1234","Services","0","10,000 K"\n'
+                 '"explorer.exe","5678","Console","1","90,000 K"\n')
+TASKLIST_GAME = TASKLIST_IDLE + '"SkyrimSE.exe","9999","Console","1","2,000,000 K"\n'
+
+
+def test_running_processes_parses_tasklist_csv():
+    names = ["SkyrimSE.exe", "TexGenx64.exe"]
+    assert lodregen.running_processes(names, csv_text=TASKLIST_IDLE) == []
+    assert lodregen.running_processes(names, csv_text=TASKLIST_GAME) == ["SkyrimSE.exe"]
+
+
+def make_env(tmp_path, monkeypatch, trio_in_data=True, ledger_list_out=None):
+    """Fixture game env: fake Data + real Plugins.txt handled by the REAL
+    modkit.pluginstxt, fake ledger_bridge, idle tasklist."""
+    data = tmp_path / "Data"
+    data.mkdir(exist_ok=True)
+    plugins = tmp_path / "Plugins.txt"
+    lines = ["*Unofficial Skyrim Special Edition Patch.esp", "*SomeMod.esp",
+             "*DynDOLOD.esm", "*DynDOLOD.esp", "*Occlusion.esp"]
+    plugins.write_bytes(b"\xef\xbb\xbf"
+                        + ("\r\n".join(lines) + "\r\n").encode("utf-8"))
+    (tmp_path / "backups").mkdir(exist_ok=True)
+    preset = SimpleNamespace(
+        DATA_DIR=str(data), PLUGINS_TXT=str(plugins),
+        PROCESS_NAMES=["SkyrimSE.exe"], RUNTIME="1.6.1170",
+        STAGING_ROOT=str(tmp_path / "staging"),
+        BACKUPS_DIR=str(tmp_path / "backups"))
+    sec = fixture_section(tmp_path)
+    cfg = {"lodregen": {"skyrim": sec}}
+    # tool exes + ini exist
+    for key, p in sec["tools"].items():
+        Path(p).parent.mkdir(parents=True, exist_ok=True)
+        Path(p).write_text("Wizard=0\nExpert=0\n" if key == "dyndolod_ini" else "MZ")
+    # NG markers exist
+    for m in sec["ng_markers"]:
+        _mk(data, m.replace("\\", "/"))
+    if trio_in_data:
+        for name in sec["trio"]:
+            (data / name).write_bytes(make_tes4(["Skyrim.esm"]))
+    # ledger fake
+    calls = []
+    list_out = ledger_list_out if ledger_list_out is not None else (
+        "DynDOLOD Output  installed 2026-06-28  DynDOLOD.esm\n"
+        "TexGen Output  installed 2026-06-28\n")
+
+    def fake_run(argv):
+        calls.append(list(argv))
+        if argv[0] == "list":
+            return 0, list_out
+        if argv[0] == "get":
+            name = argv[argv.index("--name") + 1]
+            safe = name.replace(" ", "-").replace("(", "").replace(")", "")
+            return 0, json.dumps({"name": name,
+                                  "manifest": f"manifests\\{safe}.txt"})
+        return 0, "ok"
+
+    monkeypatch.setattr(lodregen.ledger_bridge, "run", fake_run)
+    monkeypatch.setattr(lodregen, "running_processes", lambda names: [])
+    return SimpleNamespace(cfg=cfg, sec=sec, preset=preset, data=data,
+                           plugins=plugins, ledger_calls=calls)
+
+
+def write_manifest_fixture(env, name, rels):
+    mdir = Path(env.sec["ledger_dir"]) / "manifests"
+    mdir.mkdir(parents=True, exist_ok=True)
+    safe = name.replace(" ", "-").replace("(", "").replace(")", "")
+    (mdir / f"{safe}.txt").write_bytes(
+        b"\xef\xbb\xbf" + ("\r\n".join(rels) + "\r\n").encode("utf-8"))
+
+
+def _pre_args(**kw):
+    d = dict(game="skyrim", no_pgpatcher=False, clean_texgen=False, force=False)
+    d.update(kw)
+    return SimpleNamespace(**d)
+
+
+def test_pre_pulls_trio_disables_lines_writes_state(tmp_path, monkeypatch, capsys):
+    env = make_env(tmp_path, monkeypatch)
+    write_manifest_fixture(env, "DynDOLOD Output",
+                           ["meshes\\terrain\\tamriel\\objects\\old.bto"])
+    _mk(env.data, "meshes/terrain/tamriel/objects/old.bto")
+    rc = lodregen.cmd_pre(_pre_args(), cfg=env.cfg, preset=env.preset)
+    out = capsys.readouterr().out
+    assert rc in (0, 2)
+    runs = lodregen.pending_runs(env.sec["holding_root"])
+    assert len(runs) == 1
+    run_dir, state = runs[0]
+    # trio FILES left Data (from-scratch requirement), held in run_dir\trio
+    for name in env.sec["trio"]:
+        assert not (env.data / name).exists()
+        assert (run_dir / "trio" / name).is_file()
+    assert state["pre"]["trio_moved"] == env.sec["trio"]
+    # trio lines disabled -- via the real pluginstxt
+    from modkit import pluginstxt
+    enabled = lodregen.enabled_plugins(pluginstxt.read(env.preset))
+    for name in env.sec["trio"]:
+        assert name.lower() not in enabled
+    # old output quarantined
+    assert (run_dir / "quarantine" / "meshes/terrain/tamriel/objects/old.bto").is_file()
+    # snapshot recorded and exists
+    assert Path(state["pre"]["plugins_snapshot"]).is_file()
+    # GUI ritual printed, never-drive stated, TexGen Ignore noted
+    assert "NEVER launch" in out
+    assert "TexGenx64.exe" in out and "IGNORE" in out
+    assert "post --game skyrim --stage texgen" in out
+
+
+def test_pre_protected_input_survives_polluted_manifest(tmp_path, monkeypatch, capsys):
+    env = make_env(tmp_path, monkeypatch)
+    write_manifest_fixture(env, "DynDOLOD Output", [
+        "meshes\\terrain\\tamriel\\objects\\old.bto",
+        "textures\\dyndolod\\lod\\dyndolodtreelod.dds",   # pollution
+    ])
+    _mk(env.data, "meshes/terrain/tamriel/objects/old.bto")
+    tree = _mk(env.data, "textures/dyndolod/lod/dyndolodtreelod.dds")
+    rc = lodregen.cmd_pre(_pre_args(), cfg=env.cfg, preset=env.preset)
+    out = capsys.readouterr().out
+    assert tree.is_file()               # THE guard: input never left Data
+    assert "PROTECTED" in out
+    assert rc in (0, 2)
+
+
+def test_pre_refuses_when_game_running(tmp_path, monkeypatch, capsys):
+    env = make_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(lodregen, "running_processes",
+                        lambda names: ["SkyrimSE.exe"])
+    rc = lodregen.cmd_pre(_pre_args(), cfg=env.cfg, preset=env.preset)
+    assert rc == 1
+    assert "REFUSED" in capsys.readouterr().out
+    assert lodregen.pending_runs(env.sec["holding_root"]) == []
+
+
+def test_pre_refuses_when_pending_run_exists(tmp_path, monkeypatch, capsys):
+    env = make_env(tmp_path, monkeypatch)
+    lodregen.new_run(env.sec, "skyrim")   # simulate an interrupted run
+    rc = lodregen.cmd_pre(_pre_args(), cfg=env.cfg, preset=env.preset)
+    assert rc == 1
+    assert "pending" in capsys.readouterr().out.lower()
+
+
+def test_pre_texgen_not_cleaned_by_default(tmp_path, monkeypatch):
+    env = make_env(tmp_path, monkeypatch)
+    write_manifest_fixture(env, "DynDOLOD Output", [])
+    write_manifest_fixture(env, "TexGen Output",
+                           ["textures\\lod\\some_old_texgen.dds"])
+    old_tex = _mk(env.data, "textures/lod/some_old_texgen.dds")
+    lodregen.cmd_pre(_pre_args(), cfg=env.cfg, preset=env.preset)
+    assert old_tex.is_file()   # wiki 2026-06-25: never pre-clean TexGen
+
+
+def test_pre_first_run_tolerates_missing_trio_and_entries(tmp_path, monkeypatch, capsys):
+    env = make_env(tmp_path, monkeypatch, trio_in_data=False, ledger_list_out="")
+    rc = lodregen.cmd_pre(_pre_args(), cfg=env.cfg, preset=env.preset)
+    out = capsys.readouterr().out
+    assert rc == 2          # warnings, not failure
+    assert "trio file(s) not in Data" in out
+
+
+# ---- extra: game-state 3-state handling (deploy.py's GameStateUnknown
+# contract) -- required by the task brief's "Critical safety semantics"
+# but not covered by the plan doc's own Step-1 test list.
+
+def test_pre_warns_and_refuses_when_game_state_unknown(tmp_path, monkeypatch, capsys):
+    from modkit import deploy
+    env = make_env(tmp_path, monkeypatch)
+
+    def raise_unknown(names):
+        raise deploy.GameStateUnknown("tasklist exited 1: access denied")
+    monkeypatch.setattr(lodregen, "running_processes", raise_unknown)
+    rc = lodregen.cmd_pre(_pre_args(), cfg=env.cfg, preset=env.preset)
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "WARN" in out and "could not verify" in out.lower()
+    assert "--force" in out
+    # nothing committed -- no bracket opened while state is unverifiable
+    assert lodregen.pending_runs(env.sec["holding_root"]) == []
+
+
+def test_pre_force_proceeds_past_game_state_unknown(tmp_path, monkeypatch, capsys):
+    from modkit import deploy
+    env = make_env(tmp_path, monkeypatch)
+    write_manifest_fixture(env, "DynDOLOD Output", [])
+
+    def raise_unknown(names):
+        raise deploy.GameStateUnknown("tasklist exited 1: access denied")
+    monkeypatch.setattr(lodregen, "running_processes", raise_unknown)
+    rc = lodregen.cmd_pre(_pre_args(force=True), cfg=env.cfg, preset=env.preset)
+    capsys.readouterr()
+    assert rc in (0, 2)
+    # --force pushed past the unverifiable game state and the bracket opened
+    assert len(lodregen.pending_runs(env.sec["holding_root"])) == 1
+
+
+# ---- extra: new_run() FileExistsError on a same-second collision must be
+# caught with a friendly message, never a raw traceback (per brief).
+
+def test_pre_new_run_collision_surfaces_friendly_message(tmp_path, monkeypatch, capsys):
+    env = make_env(tmp_path, monkeypatch)
+    fixed = lodregen._now()
+    monkeypatch.setattr(lodregen, "_now", lambda: fixed)
+    # a COMPLETED run already occupies the run_id cmd_pre is about to use --
+    # pending_runs() won't flag it (post is set), so cmd_pre reaches
+    # new_run() and collides on the same-second directory name.
+    run_dir, state = lodregen.new_run(env.sec, "skyrim")
+    state["pre"] = {"stamp": "x", "epoch": 1.0}
+    state["post"] = {"stamp": "y"}
+    lodregen.save_state(run_dir, state)
+    rc = lodregen.cmd_pre(_pre_args(), cfg=env.cfg, preset=env.preset)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "try again" in out.lower()
+    assert "Traceback" not in out
