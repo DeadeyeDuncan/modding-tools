@@ -11,13 +11,27 @@ class DeployError(Exception):
     """robocopy >= 8 or other hard deploy failure."""
 
 
+class GameStateUnknown(Exception):
+    """tasklist could not be run or returned an unusable result - whether the
+    game is running is unverifiable (distinct from confirmed-not-running)."""
+
+
 def game_running(preset):
-    """True if any PROCESS_NAMES appears in tasklist output."""
+    """True if any PROCESS_NAMES appears in tasklist output, False if tasklist
+    ran cleanly and found none. Raises GameStateUnknown if tasklist itself
+    could not be queried (launch failure, nonzero exit, empty/unusable output) -
+    callers must NOT treat that as "not running"."""
     try:
-        out = subprocess.run(["tasklist"], capture_output=True, text=True,
-                             encoding="utf-8", errors="replace").stdout.lower()
-    except OSError:
-        return False
+        proc = subprocess.run(["tasklist"], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
+    except OSError as ex:
+        raise GameStateUnknown(str(ex)) from ex
+    if proc.returncode != 0:
+        raise GameStateUnknown(f"tasklist exited {proc.returncode}: "
+                               f"{(proc.stderr or '').strip()[:200]}")
+    out = proc.stdout.lower()
+    if not out.strip():
+        raise GameStateUnknown("tasklist produced no output")
     return any(p.lower() in out for p in preset.PROCESS_NAMES)
 
 
@@ -55,7 +69,17 @@ def run_deploy(preset, staging_dir, anchor, force, log):
         log(f"ERROR: game {preset.NAME!r} has no data_dir configured - "
             "deploy unsupported for this preset")
         return 1
-    if game_running(preset):
+    try:
+        running = game_running(preset)
+    except GameStateUnknown as ex:
+        if not force:
+            log(f"WARN: could not verify the game is closed: {ex}; "
+                "rerun with --force if you are sure it is closed")
+            return 2
+        log(f"WARN: could not verify the game is closed: {ex}; "
+            "proceeding because --force was given")
+        running = False
+    if running:
         log(f"ERROR: game process running ({', '.join(preset.PROCESS_NAMES)}) - "
             "close it first (this gate has no --force)")
         return 1
@@ -79,7 +103,14 @@ def run_deploy(preset, staging_dir, anchor, force, log):
     plugins = [f for f in files
                if "\\" not in f and f.lower().endswith(plugin_exts)] if plugin_exts else []
     for p in plugins:
-        pluginstxt.enable(preset, p, anchor)
+        try:
+            pluginstxt.enable(preset, p, anchor)
+        except pluginstxt.PluginsTxtError as ex:
+            log(f"ERROR: Plugins.txt enable failed for {p!r}: {ex}")
+            log("files ARE already copied to Data\\ - fix the cause and re-run "
+                "`modkit deploy` (robocopy is additive and enable is idempotent, "
+                "so re-running is safe)")
+            return 1
         log(f"enabled in Plugins.txt: {p}" + (f" (after {anchor})" if anchor else ""))
     listfile = Path(staging_dir) / "staged-files.txt"
     listfile.write_text("\n".join(files) + "\n", encoding="utf-8")
