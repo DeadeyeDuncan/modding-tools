@@ -141,7 +141,17 @@ def run_remove(preset, mod_name, reason, force, log):
     if preset.DATA_DIR is None:
         log(f"ERROR: game {preset.NAME!r} has no data_dir - remove unsupported")
         return 1
-    if game_running(preset):
+    try:
+        running = game_running(preset)
+    except GameStateUnknown as ex:
+        if not force:
+            log(f"WARN: could not verify the game is closed: {ex}; "
+                "rerun with --force if you are sure it is closed")
+            return 2
+        log(f"WARN: could not verify the game is closed: {ex}; "
+            "proceeding because --force was given")
+        running = False
+    if running:
         log(f"ERROR: game process running ({', '.join(preset.PROCESS_NAMES)}) - "
             "close it first (this gate has no --force)")
         return 1
@@ -169,6 +179,7 @@ def run_remove(preset, mod_name, reason, force, log):
     plugins = entry.get("plugin")
     plugins = [plugins] if isinstance(plugins, str) else list(plugins or [])
     dependents = []
+    uncheckable = []
     if plugins and preset.PLUGINS_TXT:
         ours = {p.lower() for p in plugins}
         data_dir = Path(preset.DATA_DIR)
@@ -181,13 +192,17 @@ def run_remove(preset, mod_name, reason, force, log):
             try:
                 hdr = tes4.parse_header(data_dir / name)
             except tes4.Tes4Error:
+                uncheckable.append(name)
                 continue
             hits = [m for m in hdr["masters"] if m.lower() in ours]
             if hits:
                 dependents.append((name, hits))
-    if dependents and not force:
+    if (dependents or uncheckable) and not force:
         for name, hits in dependents:
             log(f"WARN {name} masters {', '.join(hits)} - removing would CTD it")
+        for name in uncheckable:
+            log(f"WARN could not verify whether {name} depends on {mod_name} - "
+                "unreadable header")
         log("remove REFUSED (master dependencies) - re-run with --force to override")
         return 2
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")

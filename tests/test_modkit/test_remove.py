@@ -74,3 +74,74 @@ def test_remove_refuses_running_game(game_env, make_staging, run_cli, monkeypatc
                                      "--ledger", str(game_env / "ledger.json")])
     assert lcode == 0
     assert "removed" not in json.loads(lout)
+    # confirmed-running has NO --force override, unlike the GameStateUnknown gate
+    code, out = run_cli("remove", "Running Mod", "--game", "skyrim",
+                        "--reason", "x", "--force")
+    assert code == 1
+    assert "game process running" in out
+    assert (game_env / "Data" / "Running.esp").is_file()
+    plines = (game_env / "Plugins.txt").read_bytes().decode("utf-8-sig").splitlines()
+    assert "*Running.esp" in plines
+    lcode, lout = ledger_bridge.run(["get", "--name", "Running Mod",
+                                     "--ledger", str(game_env / "ledger.json")])
+    assert lcode == 0
+    assert "removed" not in json.loads(lout)
+
+
+def test_remove_refuses_on_unknown_game_state(game_env, make_staging, run_cli,
+                                               monkeypatch):
+    from modkit import deploy
+    deploy_mod(make_staging, run_cli, {"Unknown.esp": make_tes4()},
+               mod="Unknown State Mod")
+
+    def _raise(preset):
+        raise deploy.GameStateUnknown("tasklist exited 1: access denied")
+    monkeypatch.setattr(deploy, "game_running", _raise)
+
+    code, out = run_cli("remove", "Unknown State Mod", "--game", "skyrim",
+                        "--reason", "x")
+    assert code == 2
+    assert "could not verify the game is closed" in out
+    # nothing moved, nothing disabled, ledger untouched
+    assert (game_env / "Data" / "Unknown.esp").is_file()
+    assert not list((game_env / "backups").glob("removed-Unknown-State-Mod-*"))
+    plines = (game_env / "Plugins.txt").read_bytes().decode("utf-8-sig").splitlines()
+    assert "*Unknown.esp" in plines
+    lcode, lout = ledger_bridge.run(["get", "--name", "Unknown State Mod",
+                                     "--ledger", str(game_env / "ledger.json")])
+    assert lcode == 0
+    assert "removed" not in json.loads(lout)
+
+    code, out = run_cli("remove", "Unknown State Mod", "--game", "skyrim",
+                        "--reason", "forced through", "--force")
+    assert code == 0
+    assert not (game_env / "Data" / "Unknown.esp").exists()
+    qdirs = list((game_env / "backups").glob("removed-Unknown-State-Mod-*"))
+    assert len(qdirs) == 1 and (qdirs[0] / "Unknown.esp").is_file()
+    plines = (game_env / "Plugins.txt").read_bytes().decode("utf-8-sig").splitlines()
+    assert "Unknown.esp" in plines and "*Unknown.esp" not in plines
+    lcode, lout = ledger_bridge.run(["get", "--name", "Unknown State Mod",
+                                     "--ledger", str(game_env / "ledger.json")])
+    entry = json.loads(lout)
+    assert entry.get("removedReason") == "forced through"
+
+
+def test_remove_refuses_on_unparseable_dependent_header(game_env, make_staging, run_cli):
+    deploy_mod(make_staging, run_cli, {"Master.esm": make_tes4(esm=True)},
+               mod="Master Mod Two")
+    # deliberately-corrupt other-enabled plugin: fails tes4.parse_header (bad magic)
+    (game_env / "Data" / "Corrupt.esp").write_bytes(b"JUNKJUNKJUNKTRUNCATED")
+    with open(game_env / "Plugins.txt", "ab") as f:
+        f.write(b"*Corrupt.esp\r\n")
+    code, out = run_cli("remove", "Master Mod Two", "--game", "skyrim",
+                        "--reason", "trying anyway")
+    assert code == 2
+    assert "Corrupt.esp" in out and "could not verify" in out
+    assert (game_env / "Data" / "Master.esm").is_file()  # nothing moved
+    assert not list((game_env / "backups").glob("removed-Master-Mod-Two-*"))
+    code, out = run_cli("remove", "Master Mod Two", "--game", "skyrim",
+                        "--reason", "forced", "--force")
+    assert code == 0
+    assert not (game_env / "Data" / "Master.esm").exists()
+    qdirs = list((game_env / "backups").glob("removed-Master-Mod-Two-*"))
+    assert len(qdirs) == 1 and (qdirs[0] / "Master.esm").is_file()
