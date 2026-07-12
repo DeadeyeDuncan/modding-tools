@@ -98,6 +98,17 @@ def run_deploy(preset, staging_dir, anchor, force, log):
     if not files:
         log("ERROR: payload is empty - nothing to deploy")
         return 1
+    deploy_dirs = tuple(getattr(preset, "DEPLOY_DIRS", ()) or ())
+    if deploy_dirs:
+        stray = [p.name for p in pay.iterdir()
+                 if not (p.is_dir() and p.name.lower() in deploy_dirs)]
+        if stray and not force:
+            for s in stray:
+                log(f"WARN stray top-level entry (expected only "
+                    f"{'/'.join(deploy_dirs)}): {s}")
+            log("deploy REFUSED - re-stage with only game dirs at payload root, "
+                "or re-run with --force")
+            return 2
     rc = robocopy(pay, preset.DATA_DIR)
     log(f"robocopy exit {rc} (<8 = success): {len(files)} files -> {preset.DATA_DIR}")
     st.data["files"] = files

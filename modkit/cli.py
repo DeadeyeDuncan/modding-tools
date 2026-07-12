@@ -176,6 +176,10 @@ def cmd_conflicts(args):
         owner = (f"currently owned by {h['owner']}" if h["owner"]
                  else "owner unknown (no manifest claims it)")
         safe_print(f"OVERLAP {h['path']} - {owner}; deploying makes this mod win")
+    order_fn = getattr(preset, "archive_order_report", None)
+    if order_fn:
+        for line in order_fn(preset, pay):
+            safe_print(f"ORDER {line}")
     st.data["vet_results"]["conflicts"] = {
         "overlaps": len(hits), "paths": [h["path"] for h in hits][:200]}
     st.stamp("conflicts")
