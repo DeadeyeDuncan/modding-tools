@@ -27,7 +27,7 @@ Command crib:
 - `plugins list|enable|disable|snapshot|diff` - BOM/CRLF-safe Plugins.txt; snapshot/diff around Wrye Bash/xEdit/DynDOLOD
 
 **Why:** the hand-rolled install pipeline re-fired its known failure modes every session (reflection-notes #1: FO4 mix-ups x3, include-pattern failures x4, anchor slips x2, wrong-runtime DLLs, half-installs undetected for days).
-**How to apply:** NEVER hand-roll 7z x / Expand-Archive / robocopy-to-Data / Plugins.txt writes / ledger.json edits - modkit owns them. ledger.py stays the sole ledger writer (modkit calls it). An advisory PreToolUse guard to flag hand-rolling is planned but not yet shipped. Config: C:\Modding\tools\modkit.json. Spec/plan: C:\Modding\tools\docs\2026-07-11-modkit-*.md.
+**How to apply:** NEVER hand-roll 7z x / Expand-Archive / robocopy-to-Data / Plugins.txt writes / ledger.json edits - modkit owns them. ledger.py stays the sole ledger writer (modkit calls it). An advisory PreToolUse guard (`C:\Modding\tools\adoption\modkit-guard.py`) is active and flags hand-rolled extraction/Data-copy/Plugins.txt/ledger.json edits mid-session - it never blocks, only warns. Config: C:\Modding\tools\modkit.json. Spec/plan: C:\Modding\tools\docs\2026-07-11-modkit-*.md.
 ```
 
 ## Cyberpunk 2077
