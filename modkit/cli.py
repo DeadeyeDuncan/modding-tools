@@ -9,7 +9,7 @@ import re
 import sys
 from pathlib import Path
 
-from modkit import config, lodregen
+from modkit import config, lodregen, snapshot
 
 PIPELINE = """typical install pipeline (skyrim):
   intake -> stage -> fomod (if present) -> dllvet -> esp -> conflicts -> deploy -> verify
@@ -556,6 +556,7 @@ def _register_all(sub, common):
     register_verify(sub, common)
     register_status(sub, common)
     lodregen.register(sub)
+    snapshot.register(sub)
 
 
 def main(argv=None):

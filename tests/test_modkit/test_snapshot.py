@@ -436,3 +436,61 @@ def test_diff_section_presence_change_reported():
     live = _snap(dlls={"dir": "d", "dlls": ["a.dll"]})
     text, deltas, _ = snapshot.diff_report(base, live)
     assert deltas == 1 and "appeared (newly configured)" in text
+
+
+# ---------------------------------------------------------------- Task 6
+
+def _cli(argv):
+    p = argparse.ArgumentParser(prog="modkit")
+    sub = p.add_subparsers(dest="command", required=True)
+    snapshot.register(sub)
+    return p.parse_args(argv)
+
+
+def _patch_ctx(monkeypatch, preset, snap_cfg=None):
+    monkeypatch.setattr(snapshot, "_ctx", lambda args: (preset, snap_cfg or {}))
+
+
+def test_register_parses_snapshot_cmds():
+    a = _cli(["snapshot", "take", "--game", "skyrim"])
+    assert a.func is snapshot.cmd_take and a.game == "skyrim"
+    a = _cli(["snapshot", "diff", "--game", "cp77", "--against", "x.json"])
+    assert a.func is snapshot.cmd_diff and a.against == "x.json"
+
+
+def test_cmd_take_rc0_clean_rc2_on_warning(tmp_path, monkeypatch, capsys):
+    _patch_core(monkeypatch)
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    rc = snapshot.cmd_take(_cli(["snapshot", "take", "--game", "skyrim"]))
+    assert rc == 0
+    assert "snapshot written:" in capsys.readouterr().out
+    # a missing dllDir produces a warning -> rc 2
+    _patch_ctx(monkeypatch, preset, {"dllDir": str(tmp_path / "gone")})
+    rc = snapshot.cmd_take(_cli(["snapshot", "take", "--game", "skyrim"]))
+    assert rc == 2
+    assert "WARNING:" in capsys.readouterr().out
+
+
+def test_cmd_diff_no_snapshots_rc1(tmp_path, monkeypatch, capsys):
+    _patch_core(monkeypatch)
+    _patch_ctx(monkeypatch, _stub_preset(tmp_path))
+    rc = snapshot.cmd_diff(_cli(["snapshot", "diff", "--game", "skyrim"]))
+    assert rc == 1
+    assert "no snapshots" in capsys.readouterr().out
+
+
+def test_cmd_take_then_diff_clean_then_drift(tmp_path, monkeypatch, capsys):
+    plugins = ["*A.esp", "*B.esp"]
+    monkeypatch.setattr(snapshot.pluginstxt, "read", lambda p: list(plugins))
+    monkeypatch.setattr(snapshot.ledger_bridge, "run", lambda a: LEDGER_OK)
+    preset = _stub_preset(tmp_path)
+    _patch_ctx(monkeypatch, preset)
+    assert snapshot.cmd_take(_cli(["snapshot", "take", "--game", "skyrim"])) == 0
+    assert snapshot.cmd_diff(_cli(["snapshot", "diff", "--game", "skyrim"])) == 0
+    assert "no drift" in capsys.readouterr().out
+    plugins[1] = "B.esp"  # user disables a plugin between sessions
+    rc = snapshot.cmd_diff(_cli(["snapshot", "diff", "--game", "skyrim"]))
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "B.esp: enabled -> DISABLED" in out and "ASK THE USER" in out

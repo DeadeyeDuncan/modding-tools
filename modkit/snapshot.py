@@ -520,3 +520,79 @@ def diff_report(base, live):
         if deltas:
             out.append(ASK_THE_USER)
     return "\n".join(out), deltas, len(warnings)
+
+
+# --------------------------------------------------------------------------
+# CLI handlers + registration
+# --------------------------------------------------------------------------
+
+def _ctx(args):
+    """Resolve (preset, snapshot-config) via the core interfaces.
+
+    The single seam tests monkeypatch; everything below it is pure logic
+    over fixture paths.
+    """
+    cfg = config.load()
+    preset = config.game(cfg, args.game)
+    return preset, snapshot_cfg(cfg, args.game)
+
+
+def cmd_take(args):
+    preset, snap_cfg = _ctx(args)
+    path, snap = take(args.game, preset, snap_cfg)
+    safe_print(f"snapshot written: {path}")
+    for w in snap["warnings"]:
+        safe_print(f"WARNING: {w}")
+    return 2 if snap["warnings"] else 0
+
+
+def cmd_diff(args):
+    preset, snap_cfg = _ctx(args)
+    if args.against:
+        base_path = Path(args.against)
+        if not base_path.is_file():
+            safe_print(f"ERROR: snapshot not found: {base_path}")
+            return 1
+    else:
+        base_path = latest_snapshot(snapshots_dir(preset))
+        if base_path is None:
+            safe_print(f"no snapshots in {snapshots_dir(preset)} - "
+                       f"run: modkit snapshot take --game {args.game}")
+            return 1
+    try:
+        base = load_snapshot(base_path)
+    except (OSError, ValueError) as ex:
+        safe_print(f"ERROR: cannot read snapshot {base_path}: {ex}")
+        return 1
+    live = capture(args.game, preset, snap_cfg)
+    text, deltas, warnings = diff_report(base, live)
+    safe_print(f"snapshot diff - {args.game}")
+    safe_print(f"baseline: {base_path} (taken {base.get('takenAt', '?')})")
+    safe_print("live:     captured now")
+    safe_print("")
+    safe_print(text)
+    return 2 if (deltas or warnings) else 0
+
+
+def register(sub):
+    """Wire the snapshot subcommand into the modkit CLI.
+
+    `sub` is the top-level argparse subparsers object in modkit\\cli.py.
+    Handlers are plain `func(args) -> int` set via set_defaults, matching
+    the core dispatch (`args.func(args)`, ledger.py pattern). --game is
+    declared on each leaf parser so this module is self-contained.
+    """
+    sp = sub.add_parser(
+        "snapshot", help="per-game session-state snapshot: take / diff")
+    ssub = sp.add_subparsers(dest="snapshot_cmd", required=True)
+
+    t = ssub.add_parser(
+        "take", help="capture live state to <game>-manual\\snapshots\\")
+    t.add_argument("--game", required=True, help="skyrim | cp77")
+    t.set_defaults(func=cmd_take)
+
+    d = ssub.add_parser(
+        "diff", help="latest (or --against) snapshot vs live state; exit 2 = drift")
+    d.add_argument("--game", required=True, help="skyrim | cp77")
+    d.add_argument("--against", help="explicit snapshot .json (default: latest)")
+    d.set_defaults(func=cmd_diff)
