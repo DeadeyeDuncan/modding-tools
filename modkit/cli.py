@@ -4,6 +4,7 @@ Exit codes: 0 clean/success, 1 error or verify findings, 2 warned (forceable gat
 """
 import argparse
 import datetime
+import json
 import re
 import sys
 from pathlib import Path
@@ -156,6 +157,53 @@ def register_stage(sub, common):
     sp.set_defaults(func=cmd_stage)
 
 
+def _staging_for(args, preset):
+    from modkit import state
+    if getattr(args, "staging", None):
+        return Path(args.staging)
+    latest = state.latest_staging(preset)
+    if latest is None:
+        raise config.ConfigError(
+            f"no staging dirs under {preset.STAGING_ROOT} - run `modkit stage` first")
+    return latest
+
+
+def cmd_fomod(args):
+    from modkit import fomod, state
+    preset = _preset(args)
+    staging = _staging_for(args, preset)
+    st = state.InstallState.load(str(staging))
+    payload = staging / "payload"
+    if args.apply:
+        try:
+            picks = json.loads(Path(args.apply).read_bytes().decode("utf-8-sig"))
+            count = fomod.apply(payload, staging, picks)
+        except (OSError, json.JSONDecodeError, fomod.FomodError) as ex:
+            safe_print(f"ERROR: {ex}")
+            return 1
+        st.data["vet_results"]["fomod"] = {"picks": picks, "files": count}
+        st.stamp("fomod")
+        safe_print(f"fomod applied: {count} files -> {staging / 'payload_final'}")
+        return 0
+    try:
+        tree = fomod.parse(payload)
+    except fomod.FomodError as ex:
+        safe_print(f"ERROR: {ex}")
+        return 1
+    safe_print(json.dumps(tree, indent=2, ensure_ascii=False))
+    return 0
+
+
+def register_fomod(sub, common):
+    sp = sub.add_parser("fomod", parents=[common],
+                        help="print ModuleConfig option tree as JSON; --apply picks.json "
+                             "materializes the chosen files into payload_final\\")
+    sp.add_argument("--staging", default=None, help="staging dir (default: latest)")
+    sp.add_argument("--apply", default=None, metavar="PICKS_JSON",
+                    help='picks file: {"<step>::<group>": ["Plugin", ...]}')
+    sp.set_defaults(func=cmd_fomod)
+
+
 def _preset(args):
     cfg = config.load(getattr(args, "config", None))
     game = getattr(args, "game", None)
@@ -188,6 +236,7 @@ def _register_all(sub, common):
     """Each task appends its register_<cmd>(sub, common) call here."""
     register_intake(sub, common)
     register_stage(sub, common)
+    register_fomod(sub, common)
 
 
 def main(argv=None):
