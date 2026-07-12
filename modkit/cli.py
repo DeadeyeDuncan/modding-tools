@@ -251,6 +251,70 @@ def register_esp(sub, common):
     sp.set_defaults(func=cmd_esp)
 
 
+def cmd_dllvet(args):
+    from modkit import peparse, state
+    preset = _preset(args)
+    staging = _staging_for(args, preset)
+    st = state.InstallState.load(str(staging))
+    pay = state.payload_root(staging)
+    dlls = sorted(p for p in pay.rglob("*") if p.suffix.lower() == ".dll")
+    if not dlls:
+        safe_print("no DLLs in payload - nothing to vet")
+        st.stamp("dllvet")
+        return 0
+    runtime = peparse.encode_runtime(preset.RUNTIME) if preset.RUNTIME else None
+    results, warned = {}, False
+    for dll in dlls:
+        rel = str(dll.relative_to(pay))
+        verdict, notes = "OK", []
+        try:
+            pe = peparse.PEFile(dll)
+            if pe.machine != "x64":
+                verdict = "BAD_ARCH"
+                notes.append(f"machine={pe.machine}, need x64")
+            else:
+                vd = peparse.skse_version_data(pe)
+                if vd is None:
+                    if "SKSEPlugin_Query" in pe.exports():
+                        verdict = "RESEARCH"
+                        notes.append("pre-AE SKSEPlugin_Query interface (1.5.97-era "
+                                     "unless proven NG) - research the build first")
+                    else:
+                        verdict = "INFO"
+                        notes.append("no SKSE exports (ENB/preloader/other) - vet by source")
+                else:
+                    if vd["address_independent"]:
+                        notes.append("version-independent via Address Library")
+                    elif runtime and runtime in vd["compatible"]:
+                        notes.append(f"declares runtime {preset.RUNTIME}")
+                    elif runtime:
+                        verdict = "WRONG_RUNTIME"
+                        declared = ", ".join(peparse.decode_runtime(v)
+                                             for v in vd["compatible"]) or "(none)"
+                        notes.append(f"declares [{declared}], config runtime "
+                                     f"{preset.RUNTIME}")
+                if peparse.scan_markers(dll)["address_library"]:
+                    notes.append("needs Address Library (versionlib marker found)")
+        except peparse.PeError as ex:
+            verdict = "UNPARSEABLE"
+            notes = [str(ex)]
+        if verdict in ("WRONG_RUNTIME", "BAD_ARCH", "RESEARCH", "UNPARSEABLE"):
+            warned = True
+        results[rel] = {"verdict": verdict, "notes": notes}
+        safe_print(f"{verdict:14} {rel}" + (f" - {'; '.join(notes)}" if notes else ""))
+    st.data["vet_results"]["dllvet"] = results
+    st.stamp("dllvet")
+    return 2 if warned else 0
+
+
+def register_dllvet(sub, common):
+    sp = sub.add_parser("dllvet", parents=[common],
+                        help="PE-parse payload DLLs: declared runtime vs config "
+                             "runtime, Address Library independence, pre-AE detect")
+    sp.add_argument("--staging", default=None, help="staging dir (default: latest)")
+    sp.set_defaults(func=cmd_dllvet)
+
+
 def _preset(args):
     cfg = config.load(getattr(args, "config", None))
     game = getattr(args, "game", None)
@@ -285,6 +349,7 @@ def _register_all(sub, common):
     register_stage(sub, common)
     register_fomod(sub, common)
     register_esp(sub, common)
+    register_dllvet(sub, common)
 
 
 def main(argv=None):
